@@ -1,0 +1,381 @@
+/* 32X blit budget benchmark, master SH-2.
+ *
+ * Ramps the sprite count until the frame's drawing work stops fitting in the
+ * target frame time, and reports the number. That number is the ceiling every
+ * other design decision hangs off: art size, entity counts, frame rate.
+ *
+ * Controls:
+ *   A      cycle background mode (none / full redraw / dirty rect)
+ *   B      toggle the slave SH-2
+ *   C      toggle target frame rate (60 / 30)
+ *   START  toggle auto ramp, then UP/DOWN adjust the count by hand
+ */
+
+#include "mars.h"
+#include "string.h"
+#include "bench.h"
+
+uint16_t bgImage[PLAY_HEIGHT * FB_LINE_WORDS] __attribute__((aligned(4)));
+uint16_t sprImage[SPRITE_H * SPRITE_WORDS] __attribute__((aligned(4)));
+uint16_t scratchBuf[SCRATCH_SLOTS * SPRITE_H * SPRITE_WORDS] __attribute__((aligned(4)));
+
+static uint32_t lastTick = 0;
+static uint16_t currentFB = 0;
+
+static uint16_t joypad = 0, joypadPrev = 0;
+
+/* Timer -------------------------------------------------------------- */
+
+/* Free running timer at phi/32: 719 kHz, 1.39 us per tick, wraps at 91 ms */
+static void frt_init(void)
+{
+	SH2_FRT_TCR = 1;
+	SH2_FRT_FRCH = 0;
+	SH2_FRT_FRCL = 0;
+}
+
+static inline uint16_t frt_read(void)
+{
+	uint16_t hi = SH2_FRT_FRCH;
+	uint16_t lo = SH2_FRT_FRCL;
+	return (hi << 8) | lo;
+}
+
+/* 32000000 / 23011360 = 1.39064 us per tick, as a fixed point multiply */
+static inline uint32_t ticks_to_us(uint32_t ticks)
+{
+	return (ticks * 5698u) >> 12;
+}
+
+/* Text ---------------------------------------------------------------- */
+
+static char textBuf[40];
+
+static int put_uint(char *out, uint32_t v, int width)
+{
+	char tmp[12];
+	int n = 0, i;
+
+	do {
+		tmp[n++] = '0' + (v % 10);
+		v /= 10;
+	} while (v);
+
+	for (i = n; i < width; i++) *out++ = ' ';
+	for (i = n - 1; i >= 0; i--) *out++ = tmp[i];
+	return (width > n ? width : n);
+}
+
+static int put_str(char *out, const char *s)
+{
+	int n = 0;
+	while (*s) out[n++] = *s++;
+	return n;
+}
+
+/* Content ------------------------------------------------------------- */
+
+/* A checkerboard of colour ramps, so a wrong blit is obvious on screen */
+static void build_background(void)
+{
+	int y, x;
+
+	for (y = 0; y < PLAY_HEIGHT; y++) {
+		for (x = 0; x < SCREEN_WIDTH; x += 2) {
+			int tile = ((x >> 5) + (y >> 5)) & 1;
+			uint8_t a = tile ? (uint8_t)(64 + ((x >> 1) & 31))
+			                 : (uint8_t)(96 + ((y >> 1) & 31));
+			uint8_t b = tile ? (uint8_t)(64 + (((x + 1) >> 1) & 31))
+			                 : (uint8_t)(96 + ((y >> 1) & 31));
+			bgImage[y * FB_LINE_WORDS + (x >> 1)] = ((uint16_t)a << 8) | b;
+		}
+	}
+}
+
+/* A filled disc, index 0 outside so the overwrite image skips those bytes */
+static void build_sprite(void)
+{
+	int y, x;
+	const int r = SPRITE_W / 2;
+
+	for (y = 0; y < SPRITE_H; y++) {
+		for (x = 0; x < SPRITE_W; x += 2) {
+			uint8_t px[2];
+			int i;
+			for (i = 0; i < 2; i++) {
+				int dx = (x + i) - r;
+				int dy = y - r;
+				int d2 = dx * dx + dy * dy;
+				if (d2 < r * r) {
+					int shade = 8 + ((r * r - d2) >> 3);
+					if (shade > 31) shade = 31;
+					px[i] = (uint8_t)shade;
+				} else {
+					px[i] = 0;
+				}
+			}
+			sprImage[y * SPRITE_WORDS + (x >> 1)] =
+				((uint16_t)px[0] << 8) | px[1];
+		}
+	}
+}
+
+static void build_palette(void)
+{
+	volatile uint16_t *pal = &MARS_CRAM;
+	int i;
+
+	pal[0] = COLOR(0, 0, 0);
+	/* 1..31 sprite shading, blue to white */
+	for (i = 1; i < 32; i++) pal[i] = COLOR(i >> 1, i >> 1, 31);
+	/* 64..95 and 96..127 the two background tile ramps */
+	for (i = 0; i < 32; i++) pal[64 + i] = COLOR(0, 6 + (i >> 2), 2);
+	for (i = 0; i < 32; i++) pal[96 + i] = COLOR(3, 3, 8 + (i >> 2));
+}
+
+/* Copy the whole play area in, the cost a naive engine pays every frame */
+static void draw_background_full(void)
+{
+	volatile uint32_t *dst = (volatile uint32_t *)((&MARS_FRAMEBUFFER)
+	                       + FB_DATA_WORD + PLAY_TOP * FB_LINE_WORDS);
+	const uint32_t *src = (const uint32_t *)bgImage;
+	int n = (PLAY_HEIGHT * FB_LINE_WORDS) / 2;
+
+	while (n >= 8) {
+		dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+		dst[4] = src[4]; dst[5] = src[5]; dst[6] = src[6]; dst[7] = src[7];
+		dst += 8; src += 8; n -= 8;
+	}
+	while (n--) *dst++ = *src++;
+}
+
+/* Main ---------------------------------------------------------------- */
+
+static void joypad_update(void)
+{
+	joypadPrev = joypad;
+	HwMdReadPad(0);
+	joypad = MARS_SYS_COMM8;
+}
+
+static inline int pressed(uint16_t btn)
+{
+	return (joypad & btn) && !(joypadPrev & btn);
+}
+
+/* Ask the 68000 to turn its scrolling background plane on or off */
+static void md_set_bg(int on)
+{
+	while (MARS_SYS_COMM0) ;
+	MARS_SYS_COMM2 = on ? 1 : 0;
+	MARS_SYS_COMM0 = 0x0800;
+	while (MARS_SYS_COMM0) ;
+}
+
+/* Wipe the play area to transparent, used when switching modes so the
+ * previous mode's leftovers do not linger in the other buffer */
+static void clear_play_area(void)
+{
+	volatile uint32_t *dst = (volatile uint32_t *)((&MARS_FRAMEBUFFER)
+	                       + FB_DATA_WORD + PLAY_TOP * FB_LINE_WORDS);
+	int n = (PLAY_HEIGHT * FB_LINE_WORDS) / 2;
+
+	while (n--) *dst++ = 0;
+}
+
+static void swap_buffers(void)
+{
+	while (lastTick == MARS_SYS_COMM12) ;
+	MARS_VDP_FBCTL = currentFB ^ 1;
+	while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB) ;
+	currentFB ^= 1;
+	lastTick = MARS_SYS_COMM12;
+}
+
+int m_main(void)
+{
+	uint32_t frame = 0;
+	int nSprites = 16;
+	int peak = 0;
+	int bgMode = 1;
+	/* 0 = master only, 1 = both blitting, 2 = master blits everything while
+	 * the slave does the same amount of work in SDRAM only */
+	int cpuMode = 0;
+	int slaveAlive = 0;
+	int target60 = 1;
+	int autoRamp = 1;
+	uint32_t usFrame = 0;
+	int prevCount[2] = { 0, 0 };
+	uint32_t prevFrame[2] = { 0, 0 };
+	/* A single frame's timing is too noisy to steer on, so hold the count
+	 * fixed for a window and judge it by its worst frame. Worst case is
+	 * what a game actually has to live inside anyway. */
+	uint32_t winMin = 0xFFFFFFFFu, winMax = 0;
+	uint32_t repMin = 0, repMax = 0;
+	int winFrames = 0;
+	int clearPending = 0;
+
+	Hw32xInit(MARS_VDP_MODE_256, 0);
+	frt_init();
+	build_palette();
+	build_background();
+	build_sprite();
+
+	Hw32xDelay(1);
+	HwMdPuts("32X BLIT BUDGET", 0x2000, 1, 0);
+
+	/* Let the slave purge its cache and come up before handing it work.
+	 * Bounded, so a slave that never answers costs us the second CPU
+	 * rather than the whole program. */
+	{
+		uint32_t spins = 0;
+		while (MARS_SYS_COMM4 != SLAVE_READY && ++spins < 4000000u) ;
+		slaveAlive = (MARS_SYS_COMM4 == SLAVE_READY);
+		MARS_SYS_COMM4 = 0;
+	}
+	cpuMode = slaveAlive ? 1 : 0;
+
+	for (;;) {
+		uint16_t t0, t1;
+		int i, step;
+		uint32_t targetUs = target60 ? 16667 : 33333;
+
+		joypad_update();
+
+		/* Any config change invalidates the peak for the old config */
+		if (pressed(SEGA_CTRL_A)) {
+			bgMode = (bgMode + 1) & 3;
+			peak = 0;
+			md_set_bg(bgMode == 3);
+			clearPending = 2;   /* wipe both buffers of the old mode */
+		}
+		if (pressed(SEGA_CTRL_B) && slaveAlive) { cpuMode = (cpuMode + 1) % 3; peak = 0; }
+		if (pressed(SEGA_CTRL_C)) { target60 ^= 1; peak = 0; }
+		if (pressed(SEGA_CTRL_START)) { autoRamp ^= 1; peak = 0; }
+		if (!autoRamp) {
+			if (pressed(SEGA_CTRL_UP))   nSprites += 8;
+			if (pressed(SEGA_CTRL_DOWN)) nSprites -= 8;
+		}
+		if (nSprites < 0) nSprites = 0;
+		if (nSprites > MAX_SPRITES) nSprites = MAX_SPRITES;
+
+		/* Everything between the two timer reads is the frame's drawing
+		 * work. The vsync wait and the text output are deliberately
+		 * outside it. */
+		if (clearPending) {
+			clear_play_area();
+			clearPending--;
+		}
+
+		t0 = frt_read();
+
+		if (bgMode == 3) {
+			/* Genesis VDP owns the background. All the 32X has to do is
+			 * clear where its own sprites were, back to transparent. */
+			for (i = 0; i < prevCount[1]; i++) {
+				int x, y;
+				sprite_pos(i, prevFrame[1], &x, &y);
+				clear_rect(x, y);
+			}
+		} else if (bgMode == 1) {
+			draw_background_full();
+		} else if (bgMode == 2) {
+			/* Restore what the sprites covered two frames ago, since
+			 * that is when this buffer was last drawn into */
+			for (i = 0; i < prevCount[1]; i++) {
+				int x, y;
+				sprite_pos(i, prevFrame[1], &x, &y);
+				restore_rect(x, y);
+			}
+		}
+
+		/* In SDRAM mode the master still draws every sprite, so the only
+		 * difference from the single CPU case is that the slave is busy
+		 * elsewhere. That makes it a clean A/B against CPU 1. */
+		step = (cpuMode == 1) ? 2 : 1;
+		if (cpuMode != 0) {
+			MARS_SYS_COMM6 = (uint16_t)frame;
+			MARS_SYS_COMM4 = SLAVE_BUSY | (uint16_t)nSprites
+			               | ((cpuMode == 2) ? SLAVE_SDRAM : 0);
+		}
+
+		for (i = 0; i < nSprites; i += step) {
+			int x, y;
+			sprite_pos(i, frame, &x, &y);
+			blit_sprite(x, y);
+		}
+
+		if (cpuMode != 0)
+			while (MARS_SYS_COMM4 & SLAVE_BUSY) ;
+
+		t1 = frt_read();
+		usFrame = ticks_to_us((uint16_t)(t1 - t0));
+
+		/* Skip the first frames of a window: the count just changed and
+		 * with BG mode 2 the restore still refers to the old count */
+		if (winFrames >= 2) {
+			if (usFrame > winMax) winMax = usFrame;
+			if (usFrame < winMin) winMin = usFrame;
+		}
+		winFrames++;
+
+		prevCount[1] = prevCount[0];
+		prevFrame[1] = prevFrame[0];
+		prevCount[0] = nSprites;
+		prevFrame[0] = frame;
+
+		if (winFrames >= 32) {
+			int n = 0;
+			int measured = nSprites;   /* what the window actually ran */
+
+			/* Judge the window by its worst frame, then take one step */
+			if (winMax <= targetUs) {
+				if (nSprites > peak) peak = nSprites;
+				if (autoRamp) nSprites += 8;
+			} else if (autoRamp) {
+				nSprites -= 8;
+			}
+
+			repMin = winMin;
+			repMax = winMax;
+			winMin = 0xFFFFFFFFu;
+			winMax = 0;
+			winFrames = 0;
+
+			n = 0;
+			n += put_str(textBuf, "SPR ");
+			n += put_uint(textBuf + n, (uint32_t)measured, 3);
+			n += put_str(textBuf + n, "  PEAK ");
+			n += put_uint(textBuf + n, (uint32_t)peak, 3);
+			textBuf[n] = 0;
+			HwMdPuts(textBuf, 0x2000, 1, 1);
+
+			n = 0;
+			n += put_str(textBuf, "MIN ");
+			n += put_uint(textBuf + n, repMin, 5);
+			n += put_str(textBuf + n, "  MAX ");
+			n += put_uint(textBuf + n, repMax, 5);
+			n += put_str(textBuf + n, autoRamp ? "  AUTO  " : "  MANUAL");
+			textBuf[n] = 0;
+			HwMdPuts(textBuf, 0x2000, 1, 3);
+
+			n = 0;
+			n += put_str(textBuf, "CPU ");
+			n += put_str(textBuf + n, cpuMode == 0 ? "1 "
+			                        : cpuMode == 1 ? "2 " : "2S");
+			n += put_str(textBuf + n, "  BG ");
+			n += put_uint(textBuf + n, (uint32_t)bgMode, 1);
+			n += put_str(textBuf + n, "  HZ ");
+			n += put_uint(textBuf + n, target60 ? 60 : 30, 2);
+			n += put_str(textBuf + n, slaveAlive ? "  SLV OK" : "  SLV NO");
+			textBuf[n] = 0;
+			HwMdPuts(textBuf, 0x2000, 1, 2);
+
+		}
+
+		frame++;
+		swap_buffers();
+	}
+
+	return 0;
+}

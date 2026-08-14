@@ -1,0 +1,14 @@
+# build output
+*.o
+*.elf
+*.lst
+*.map
+*.bin
+*.32x
+out.*
+
+# converted assets: derived from the user's own copy of the game, regenerate
+# with tools/convert_stage.py rather than committing Sega's artwork
+assets/
+
+__pycache__/
