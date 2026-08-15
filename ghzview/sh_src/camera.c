@@ -1,4 +1,4 @@
-#include "md.h"
+#include <stdint.h>
 #include "camera.h"
 
 /* Camera_Create: horizontal dead zone half-width, constant for the life of

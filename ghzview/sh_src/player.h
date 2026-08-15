@@ -13,15 +13,25 @@
  * animation frame every update, so curling into a jump shrinks it on its own. */
 
 #include "path.h"
-#include "sonic.h"
+#include "sonic_anim.h"
+
+/* Copied from md_src/pad.h's bit layout, not a new convention: the 68000
+ * forwards its pad_read() byte to the SH2 verbatim through the tick+pad
+ * comm word (see sh_src/comm.h), so these five bits have to match exactly.
+ * Only the bits player.c actually reads are copied; UP/DOWN/START are not. */
+#define PAD_LEFT   0x04
+#define PAD_RIGHT  0x08
+#define PAD_B      0x10
+#define PAD_C      0x20
+#define PAD_A      0x40
 
 typedef struct {
 	PathEntity e;          /* position, velocity, angle, collision mode */
 	Animator animator;
 	uint8_t direction;     /* 0 right, 1 left */
 	uint8_t applyJumpCap;
-	uint8_t justJumped;    /* one-frame pulse from action_jump; main.c reads it
-	                         * to open the camera's vertical dead zone, so
+	uint8_t justJumped;    /* one-frame pulse from action_jump; s_main.c reads
+	                         * it to open the camera's vertical dead zone, so
 	                         * player.c never has to know Camera exists */
 	int16_t controlLock;
 	int16_t skidding;

@@ -1,4 +1,4 @@
-#include "md.h"
+#include <stdint.h>
 #include "trig.h"
 
 /* RSDK's Sin256/Cos256: angle is 0-255 over a full turn, result is scaled to

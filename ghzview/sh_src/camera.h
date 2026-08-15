@@ -7,8 +7,8 @@
  *
  * Position is 16.16 fixed point in world pixels, the same scale PathEntity
  * uses. It names the camera's centre, not the screen's top-left corner:
- * turning that into a screen corner, and clamping it to the map, is main.c's
- * job, not this file's. */
+ * turning that into a screen corner, and clamping it to the map, is
+ * s_main.c's job, not this file's. */
 
 typedef struct {
 	int32_t x, y;    /* 16.16, world position the camera is centred on */
@@ -25,7 +25,7 @@ void camera_init(Camera *c, int32_t x, int32_t y);
 void camera_update(Camera *c, int32_t targetX, int32_t targetY);
 
 /* Player_Action_Jump: opens the vertical dead zone so the jump impulse
- * doesn't yank the screen. Called from main.c when the player just jumped,
+ * doesn't yank the screen. Called from s_main.c when the player just jumped,
  * keeping player.c from needing to know about Camera at all. */
 void camera_open_y_offset(Camera *c);
 

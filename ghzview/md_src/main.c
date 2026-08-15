@@ -3,7 +3,9 @@
  * The point of this ROM is to prove the pipeline end to end: tile reduction,
  * palette fitting, layout conversion, hardware scrolling with rows and
  * columns streamed in as the camera moves, and the ported physics and
- * collision driving the real character sprite.
+ * collision driving the real character sprite. The 68000 handles all VDP
+ * work; pad input, physics, collision, camera and animation run on the
+ * slave SH2 and cross back over the comm-register protocol (comm.h).
  *
  * Blocks are 16x16, so two cells by two. Plane A is 64x32 cells, which is 32
  * blocks by 16, and it wraps in both axes, so scrolling only ever needs the
@@ -11,10 +13,10 @@
  */
 
 #include "md.h"
-#include "camera.h"
 #include "pad.h"
-#include "player.h"
 #include "sonic.h"
+#include "descriptor.h"
+#include "comm.h"
 
 extern const uint16_t ghz_pal[];
 extern const uint32_t ghz_tiles[];
@@ -39,9 +41,10 @@ extern const uint16_t ghz_bgmap[];
  * down, which is how Mania frames it. */
 #define BG_TOP_ROW 3
 
-static uint16_t camX;      /* pixels, screen's top-left corner in the world */
+/* Screen's top-left corner in the world, published by the slave SH2 over the
+ * comm protocol, already clamped to the map (see sh_src/s_main.c). */
+static uint16_t camX;
 static uint16_t camY;
-static uint16_t centerY;   /* Camera_Create: screenCenterY - 16 */
 
 /* First block of the currently-populated plane window: draw_block_column
  * uses firstRow to know which world rows the column it is drawing covers,
@@ -149,31 +152,13 @@ static void draw_background(void)
 	}
 }
 
-/* Turn the camera's 16.16 world position into the screen's top-left corner
- * and clamp it to the map. camera.c only knows about the target it is
- * following, not the map's size, so that clamping belongs here. */
-static void update_scroll(const Camera *cam)
-{
-	int32_t x = (cam->x >> 16) - SCREEN_HALF_W;
-	int32_t y = (cam->y >> 16) - (int32_t)centerY;
-	uint16_t limitX = (MAP_W - VIEW_BLOCKS_X) * 16u;
-	uint16_t limitY = MAP_H * 16u - 224u;
-
-	if (x < 0) x = 0;
-	if (x > (int32_t)limitX) x = (int32_t)limitX;
-	if (y < 0) y = 0;
-	if (y > (int32_t)limitY) y = (int32_t)limitY;
-
-	camX = (uint16_t)x;
-	camY = (uint16_t)y;
-}
-
 int main(void)
 {
 	uint16_t tileCount = (uint16_t)(ghz_tiles_end - ghz_tiles) / 8;
 	uint16_t frame = 0;
-	Player sonic;
-	Camera cam;
+	int16_t worldX = 0, worldY = 0;
+	uint16_t frameIndex = 0;
+	uint8_t facing = 0;
 
 	vdp_init();
 	pad_init();
@@ -188,11 +173,20 @@ int main(void)
 	vdp_colors(48, sonic_pal, 16);
 	vdp_tiles_load(ghz_tiles, TILE_BASE, tileCount);
 	sonic_gfx_init(TILE_BASE + tileCount);
-	player_init(&sonic, 80, 848);   /* ground at the act start sits near row 53 */
-	camera_init(&cam, sonic.e.x, sonic.e.y);
-	centerY = (uint16_t)(SCREEN_HALF_H - 16);   /* Camera_Create: screenCenterY - 16 */
 
-	update_scroll(&cam);
+	/* Player/Camera now live only on the slave SH2, so the descriptor table
+	 * and screenCenterY (SCREEN_HALF_H is only valid after vdp_init()) are
+	 * published before anything else that needs them. */
+	comm_boot_publish((uint32_t)&asset_descriptor - 0x880000u,
+	                   (uint16_t)(SCREEN_HALF_H - 16));
+
+	/* One-time startup block: this 68000 can no longer compute its own
+	 * initial camera position now that Player/Camera live only on the
+	 * slave, so it waits here for the slave's first published frame before
+	 * it has anything to draw. Every later call to comm_read_frame is
+	 * non-blocking; this loop is not part of that steady-state protocol. */
+	while (!comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing)) {}
+
 	firstCol = camX >> 4;
 	firstRow = camY >> 4;
 
@@ -203,18 +197,20 @@ int main(void)
 
 	for (;;) {
 		uint16_t pad = pad_read();
-		int16_t worldX, worldY;
 		uint16_t wantCol, wantRow;
 		uint16_t used;
 		static VDPSprite list[SONIC_MAX_PIECES];
 
-		player_update(&sonic, pad);
-		if (sonic.justJumped) camera_open_y_offset(&cam);
-		camera_update(&cam, sonic.e.x, sonic.e.y);
-		update_scroll(&cam);
+		/* Right after pad_read(), before anything else, matching where the
+		 * single-CPU original called player_update: this is what keeps the
+		 * phase relationship between "a vblank happened" and "input for
+		 * that vblank is available" unchanged now that the two live on
+		 * different CPUs (see sh_src/comm.h). */
+		comm_send_input(pad);
 
-		worldX = (int16_t)(sonic.e.x >> 16);
-		worldY = (int16_t)(sonic.e.y >> 16);
+		/* Non-blocking: on a torn or absent update this just re-delivers
+		 * the previous frame's cached camera/Sonic values. */
+		comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing);
 
 		/* Stream every row and column that just entered view. The plane is
 		 * only VIEW_BLOCKS_X by VIEW_BLOCKS_Y and wraps in both axes, so each
@@ -251,10 +247,10 @@ int main(void)
 		}
 
 		/* Sonic lives in world space; sprites are screen space */
-		used = sonic_build(&sonic.animator,
+		used = sonic_build(frameIndex,
 		                   worldX - (int16_t)camX,
 		                   worldY - (int16_t)camY,
-		                   sonic.direction, list, 0);
+		                   facing, list, 0);
 		list[used - 1].link = 0;
 
 		/* A frame counter next to the raw pad bits: on real hardware this is
@@ -271,7 +267,7 @@ int main(void)
 		 * ended, which would put the tile DMA in active display where the VDP
 		 * accepts a trickle and stalls the 68000 for most of the frame. */
 		vdp_wait_vblank();
-		sonic_upload(&sonic.animator);
+		sonic_upload(frameIndex);
 		vdp_sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
 		vdp_hscroll(VDP_PLAN_B, -(int16_t)(camX >> 1));

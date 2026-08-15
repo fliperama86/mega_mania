@@ -16,49 +16,22 @@ uint16_t sonic_gfx_init(uint16_t firstTile)
 	return firstTile + SONIC_MAX_FRAME_TILES;
 }
 
-const SonicFrame *sonic_frame(const Animator *a)
+static const SonicFrame *frame_at(uint16_t frameIndex)
 {
-	return &sonic_frames[sonic_anims[a->anim].first + a->frameID];
+	return &sonic_frames[frameIndex];
 }
 
-/* SetSpriteAnimation: without force, re-selecting the running animation is a
- * no-op, which is what lets the state code set the same animation every frame
- * without restarting it. */
-void sonic_set_anim(Animator *a, uint16_t anim, uint8_t force, uint16_t frameID)
+void sonic_upload(uint16_t frameIndex)
 {
-	if (a->anim == anim && !force) return;
-
-	a->anim = anim;
-	a->frameID = frameID;
-	a->timer = 0;
-	a->speed = sonic_anims[anim].speed;
-	a->duration = sonic_frames[sonic_anims[anim].first + frameID].duration;
-}
-
-void sonic_process_anim(Animator *a)
-{
-	const SonicAnim *an = &sonic_anims[a->anim];
-
-	a->timer += a->speed;
-	while (a->timer > a->duration) {
-		a->frameID++;
-		a->timer -= a->duration;
-		if (a->frameID >= an->count) a->frameID = an->loop;
-		a->duration = sonic_frames[an->first + a->frameID].duration;
-	}
-}
-
-void sonic_upload(const Animator *a)
-{
-	const SonicFrame *f = sonic_frame(a);
+	const SonicFrame *f = frame_at(frameIndex);
 
 	vdp_tiles_load(&sonic_tiles[f->tileOffset * 8], vramTile, f->tileCount);
 }
 
-uint16_t sonic_build(const Animator *a, int16_t sx, int16_t sy, uint8_t flip,
+uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
                      VDPSprite *list, uint16_t firstLink)
 {
-	const SonicFrame *f = sonic_frame(a);
+	const SonicFrame *f = frame_at(frameIndex);
 	const SonicPiece *p = &sonic_pieces[f->pieceOffset];
 	uint16_t i;
 

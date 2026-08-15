@@ -1,7 +1,10 @@
-#include "md.h"
+#include <stdint.h>
 #include "player.h"
 #include "trig.h"
-#include "pad.h"
+
+/* Filled in by assets_init() (assets.c); see sonic_anim.c, which reads
+ * frame/anim data through the same pointer. */
+extern const SonicAnim *g_sonic_anims;
 
 static int32_t abs32(int32_t v) { return v < 0 ? -v : v; }
 
@@ -122,7 +125,7 @@ static void ground_animation(Player *p)
 		if (p->animator.anim != ANI_SKID) {
 			if (p->animator.anim == ANI_SKID_TURN) {
 				if (p->animator.frameID
-				    == (uint16_t)(sonic_anims[ANI_SKID_TURN].count - 1)) {
+				    == (uint16_t)(g_sonic_anims[ANI_SKID_TURN].count - 1)) {
 					p->direction ^= 1;
 					p->skidding = 1;
 					sonic_set_anim(&p->animator, ANI_WALK, 0, 0);
@@ -286,7 +289,7 @@ void player_update(Player *p, uint16_t pad)
 	/* RSDK takes the collision box from the animation frame every update, so
 	 * the curled jump box arrives with the jump animation rather than being
 	 * switched by hand. */
-	f = sonic_frame(&p->animator);
+	f = sonic_anim_frame(&p->animator);
 	p->e.outer.left = f->outerLeft;
 	p->e.outer.top = f->outerTop;
 	p->e.outer.right = f->outerRight;
