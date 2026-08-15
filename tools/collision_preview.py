@@ -15,6 +15,7 @@ import sys
 from PIL import Image
 
 MAP_W, MAP_H = 256, 128
+STRIDE = 70          # collide.bin: four 16 byte masks, four angles, flag, pad
 
 
 def read(path):
@@ -80,7 +81,7 @@ def main():
             # collision surface, in red, only where the placement is solid
             if not floor_solid:
                 continue
-            off = b * 18
+            off = b * STRIDE
             for c in range(16):
                 hgt = coll[off + c]
                 if hgt == 0xFF:

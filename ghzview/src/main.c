@@ -1,8 +1,9 @@
-/* Green Hill Zone, converted to Mega Drive assets and scrolled with the VDP.
+/* Green Hill Zone, converted to Mega Drive assets, with Sonic on it.
  *
- * The point of this ROM is to prove the art pipeline end to end: tile
- * reduction, palette fitting, layout conversion, and hardware scrolling with
- * columns streamed in as the camera moves. No physics, no objects.
+ * The point of this ROM is to prove the pipeline end to end: tile reduction,
+ * palette fitting, layout conversion, hardware scrolling with columns streamed
+ * in as the camera moves, and the ported physics and collision driving the
+ * real character sprite.
  *
  * Blocks are 16x16, so two cells by two. Plane A is 64x32 cells, which is 32
  * blocks by 16, and it wraps, so scrolling only ever needs the one column that
@@ -11,8 +12,8 @@
 
 #include "md.h"
 #include "pad.h"
-#include "collide.h"
 #include "player.h"
+#include "sonic.h"
 
 extern const uint16_t ghz_pal[];
 extern const uint32_t ghz_tiles[];
@@ -37,24 +38,7 @@ extern const uint16_t ghz_bgmap[];
  * down, which is how Mania frames it. */
 #define BG_TOP_ROW 3
 
-/* Placeholder for Sonic: a 32x40 box built from two hardware sprites, using
- * tiles generated at boot. Enough to see where the character is and to hang
- * the ground sensors off later. */
-#define BOX_TILE   (TILE_BASE + 0)   /* filled in at boot, see build_box */
-#define BOX_W      32
-#define BOX_H      40
-
-/* How far the box will climb or drop in one frame before it is treated as a
- * wall or as a fall. Sonic's own step tolerance is about this. */
-#define STEP_UP    14
-#define STEP_DOWN  14
-#define FALL_SPEED 4
-
-static uint16_t camX;           /* pixels */
-static int16_t  boxX = 64, boxY = 0;   /* world pixels, top left of the box */
-static uint16_t boxTile;
-static uint8_t  groundAngle;
-static int16_t  prevX;
+static uint16_t camX;            /* pixels */
 static uint16_t camBlockY = 48;  /* ground at the act start sits near row 55 */
 
 /* One column of blocks, two cells wide, straight into plane A */
@@ -134,62 +118,20 @@ static void sprites_write(const VDPSprite *list, uint16_t count)
 		*((volatile uint16_t *)0xC00000) = w[i];
 }
 
-/* A hollow rectangle, so the edges of the collision box are visible.
- * MD sprites read their tiles column major, and a sprite is at most 4x4 tiles,
- * so the 32x40 box is emitted as a 4x4 block followed by a 4x1 strip. */
-static void build_box(uint16_t at)
-{
-	static uint32_t tile[21 * 8];
-	uint16_t i = 0, tx, ty, y, px;
-
-	for (tx = 0; tx < 4; tx++) {          /* top 32x32, column major */
-		for (ty = 0; ty < 4; ty++) {
-			for (y = 0; y < 8; y++) {
-				uint32_t row = 0;
-				for (px = 0; px < 8; px++) {
-					uint16_t wx = tx * 8 + px, wy = ty * 8 + y;
-					uint8_t v = (wx == 0 || wx == BOX_W - 1 || wy == 0) ? 2 : 1;
-					row = (row << 4) | v;
-				}
-				tile[i++] = row;
-			}
-		}
-	}
-	for (tx = 0; tx < 4; tx++) {          /* bottom 32x8 strip */
-		for (y = 0; y < 8; y++) {
-			uint32_t row = 0;
-			for (px = 0; px < 8; px++) {
-				uint16_t wx = tx * 8 + px;
-				uint8_t v = (wx == 0 || wx == BOX_W - 1 || y == 7) ? 2 : 1;
-				row = (row << 4) | v;
-			}
-			tile[i++] = row;
-		}
-	}
-	/* CPU writes, not vdp_tiles_load: this skeleton's DMA path only works
-	 * from ROM, and handing it a RAM array corrupts VRAM elsewhere. */
-	for (y = 0; y < 8; y++) tile[i++] = 0x33333333;   /* sensor marker */
-
-	vram_addr(at * 32);
-	for (i = 0; i < 21 * 8; i++)
-		*((volatile uint32_t *)0xC00000) = tile[i];
-}
-
 int main(void)
 {
 	uint16_t tileCount = (uint16_t)(ghz_tiles_end - ghz_tiles) / 8;
-	uint16_t lastCol, firstCol;
-	int16_t dir = 0;
-	uint16_t padPrev = 0;
+	uint16_t firstCol;
 	Player sonic;
 
 	vdp_init();
 	enable_ints;
 
-	vdp_colors(0, ghz_pal, 64);
+	/* three palettes for the stage, the fourth is Sonic's */
+	vdp_colors(0, ghz_pal, 48);
+	vdp_colors(48, sonic_pal, 16);
 	vdp_tiles_load(ghz_tiles, TILE_BASE, tileCount);
-	boxTile = TILE_BASE + tileCount;
-	build_box(boxTile);
+	sonic_gfx_init(TILE_BASE + tileCount);
 	player_init(&sonic, 80, camBlockY * 16 + 80);
 	vdp_map_clear(VDP_PLAN_A);
 	vdp_map_clear(VDP_PLAN_B);
@@ -197,22 +139,21 @@ int main(void)
 	draw_background();
 	draw_screen();
 	firstCol = 0;
-	lastCol = VIEW_BLOCKS_X - 1;
 
-	/* Drive the camera with the pad so the whole conversion can be looked at */
 	for (;;) {
 		uint16_t limit = (MAP_W - VIEW_BLOCKS_X) * 16u;
 		uint16_t pad = pad_read();
+		int16_t worldX, worldY;
+		uint16_t used;
+		static VDPSprite list[SONIC_MAX_PIECES];
 
-		(void)dir;
 		player_update(&sonic, pad);
-		boxX = (int16_t)(sonic.x >> 16) - 16;
-		boxY = (int16_t)(sonic.y >> 16) - 20;
-		groundAngle = sonic.angle;
+		worldX = (int16_t)(sonic.e.x >> 16);
+		worldY = (int16_t)(sonic.e.y >> 16);
 
 		/* camera follows, keeping the player near the middle */
 		{
-			int16_t want = boxX - 144;
+			int16_t want = worldX - 160;
 			if (want < 0) want = 0;
 			if (want > (int16_t)limit) want = (int16_t)limit;
 			camX = (uint16_t)want;
@@ -232,44 +173,19 @@ int main(void)
 				firstCol--;
 				draw_block_column(firstCol);
 			}
-			lastCol = firstCol + VIEW_BLOCKS_X - 1;
 		}
 
-		/* the box lives in world space; sprites are screen space */
-		{
-			static VDPSprite list[4];
-			int16_t sx = boxX - (int16_t)camX;
-			int16_t sy = boxY - (int16_t)(camBlockY * 16);
-
-			list[0].y = 128 + sy;
-			list[0].size = SPRITE_SIZE(4, 4);
-			list[0].link = 1;
-			list[0].attr = TILE_ATTR(3, 1, 0, 0, boxTile);
-			list[0].x = 128 + sx;
-
-			list[1].y = 128 + sy + 32;
-			list[1].size = SPRITE_SIZE(4, 1);
-			list[1].link = 0;
-			list[1].attr = TILE_ATTR(3, 1, 0, 0, boxTile + 16);
-			list[1].x = 128 + sx;
-
-			/* the two foot sensors, so their position is never a guess */
-			list[2].y = 128 + sy + BOX_H;
-			list[2].size = SPRITE_SIZE(1, 1);
-			list[2].link = 3;
-			list[2].attr = TILE_ATTR(1, 1, 0, 0, boxTile + 20);
-			list[2].x = 128 + sx + 7;
-
-			list[3].y = 128 + sy + BOX_H;
-			list[3].size = SPRITE_SIZE(1, 1);
-			list[3].link = 0;
-			list[3].attr = TILE_ATTR(1, 1, 0, 0, boxTile + 20);
-			list[3].x = 128 + sx + 24;
-
-			sprites_write(list, 4);
-		}
+		/* Sonic lives in world space; sprites are screen space */
+		used = sonic_build(&sonic.animator,
+		                   worldX - (int16_t)camX,
+		                   worldY - (int16_t)(camBlockY * 16),
+		                   sonic.direction, list, 0);
+		list[used - 1].link = 0;
 
 		vdp_vsync();
+		/* the frame's tiles go in during vblank, the sprite table right after */
+		sonic_upload(&sonic.animator);
+		sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
 		vdp_hscroll(VDP_PLAN_B, -(int16_t)(camX >> 1));
 	}

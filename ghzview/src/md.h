@@ -1,3 +1,6 @@
+#ifndef MD_H
+#define MD_H
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,3 +14,4 @@
 
 #define enable_ints __asm__("move #0x2500,%sr")
 #define disable_ints __asm__("move #0x2700,%sr")
+#endif

@@ -116,7 +116,7 @@ clean:
 # The empty recipe matters: without it these .bin files match the ROM's own
 # %.bin pattern rule and make happily overwrites the assets with copies of the
 # ROM.
-RES := $(wildcard ../assets/ghz/*.bin)
+RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin)
 $(RES): ;
 src/assets.o: $(RES)
 

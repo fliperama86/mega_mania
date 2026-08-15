@@ -2,19 +2,22 @@
 """Convert a Mania stage into Mega Drive assets.
 
 Emits into <outdir>:
-    pal.bin      4 palettes of 16 MD colours (BGR333, entry 0 transparent)
+    pal.bin      3 palettes of 16 MD colours (BGR333, entry 0 transparent);
+                 the fourth hardware palette is left for the player
     tiles.bin    unique 8x8 4bpp tiles, deduplicated including flips
     blocks.bin   per 16x16 block, 4 name table entries (tile, palette, flips)
     map_fg.bin   FG Low layout: u16 per cell, bits 0-11 block index,
                  bit 12 floor solid, bit 13 wall and roof solid (RSDK path A)
     map_bg.bin   BG Outside layout, same format
-    collide.bin  per block, 16 column heights plus angle and flag
+    collide.bin  per block, 70 bytes: floor, left wall, right wall and roof
+                 masks of 16 each, then the four angles, the flag and a pad
+                 byte to keep the stride even
 
 Block 0 is blank and block 1 is a visible X, so empty map cells read as sky
 while anything that failed conversion shows up as an obvious marker.
 
-The MD has four palettes of fifteen usable colours and every 8x8 tile draws
-from one of them, so tiles are fitted to palettes most-used-first. A tile whose
+Every 8x8 tile draws from one hardware palette of fifteen usable colours, so
+tiles are fitted to palettes most-used-first. A tile whose
 colours do not fit any palette goes to the nearest one and has its pixels
 remapped to the closest available shade, which costs a little colour accuracy
 and avoids holes in the map.
@@ -39,6 +42,11 @@ PLACEHOLDER = 1
 
 FG_LAYER = "FG Low"
 BG_LAYER = "BG Outside"
+
+# The last hardware palette belongs to the player, so the stage gets three.
+# That costs some colour accuracy on rare tiles and is the only way a character
+# can keep its own colours.
+STAGE_PALETTES = 3
 
 
 def md_colour(rgb):
@@ -70,12 +78,42 @@ def load_collision(pack, stage, paths=1, tiles=1024):
             active = buf[pos:pos + 16]; pos += 16
             yflip = buf[pos]; pos += 1
             floor = buf[pos]; pos += 1
-            pos += 3                      # lWall, rWall, roof angles
+            lwa = buf[pos]; pos += 1
+            rwa = buf[pos]; pos += 1
+            roofa = buf[pos]; pos += 1
             flag = buf[pos]; pos += 1
             if p == 0:
-                cols = bytes(heights[c] if active[c] else 0xFF
-                             for c in range(16))
-                out[t] = (cols, floor, flag, yflip)
+                floors = [heights[c] if active[c] else 0xFF for c in range(16)]
+
+                # Wall masks are not stored; RSDK rotates the floor masks in
+                # LoadTileConfig and this reproduces those loops exactly.
+                lwall = []
+                for c in range(16):
+                    h = 0
+                    while True:
+                        if h == 16:
+                            lwall.append(0xFF); break
+                        m = floors[h]
+                        if m != 0xFF and c >= m:
+                            lwall.append(h); break
+                        h += 1
+                rwall = []
+                for c in range(16):
+                    h = 15
+                    while True:
+                        if h == -1:
+                            rwall.append(0xFF); break
+                        m = floors[h]
+                        if m != 0xFF and c >= m:
+                            rwall.append(h); break
+                        h -= 1
+
+                # RSDK gives a regular tile a flat roof mask wherever the
+                # column is active, see LoadTileConfig
+                roof = [0x0F if active[c] else 0xFF for c in range(16)]
+
+                out[t] = (bytes(floors), bytes(lwall), bytes(rwall),
+                          bytes(roof), floor, lwa, rwa, roofa, flag)
     return out
 
 
@@ -193,7 +231,8 @@ def main():
 
     keep = [t for t, _ in usage.most_common(topn)]
     colours = {t: ts.colours(t) for t in keep}
-    palettes, assign, exact = fit_palettes(keep, colours, usage)
+    palettes, assign, exact = fit_palettes(keep, colours, usage,
+                                           count=STAGE_PALETTES)
     pal_index = [{c: i + 1 for i, c in enumerate(sorted(p))} for p in palettes]
 
     bank = TileBank()
@@ -285,11 +324,12 @@ def main():
             for i in range(len(blocks)):
                 t = next((k for k, v in block_of.items() if v == i), None)
                 if t is None or t not in collision:
-                    f.write(b"\xff" * 16 + b"\x00\x00")
+                    f.write(b"\xff" * 64 + bytes(6))
                 else:
-                    cols, floor, flag, _ = collision[t]
-                    f.write(cols + bytes([floor, flag]))
-                    if any(c != 0xFF for c in cols):
+                    fl, lw, rw, rf, fa, la, ra, roa, flag = collision[t]
+                    f.write(fl + lw + rw + rf
+                            + bytes([fa, la, ra, roa, flag, 0]))
+                    if any(c != 0xFF for c in fl):
                         solid += 1
             print(f"  collision           {len(blocks)} blocks, {solid} solid")
 
