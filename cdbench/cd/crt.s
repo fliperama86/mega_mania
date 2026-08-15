@@ -3,9 +3,9 @@
 | MIT License, Copyright (c) 2023 Mikael Kalms
 |
 | Stripped to just the header, the SPInit/SPMain/SPInt2 entry points the CD
-| BIOS dispatches, and a two-command comm loop (ping and BIOS status). No
-| PCM, no ADPCM, no sound sources, no drive access -- that is the next piece
-| of work, not this one.
+| BIOS dispatches, and a comm loop: ping, BIOS status, drive init and CD
+| audio playback (play/stop a track). No PCM, no ADPCM, no sound sources --
+| that is still the next piece of work, not this one.
 
 	.text
 
@@ -43,9 +43,15 @@ WaitCmd:
 	tst.b	0x800E.w
 	beq.b	WaitCmd
 	cmpi.b	#'P,0x800E.w
-	beq.b	CmdPing
+	beq	CmdPing
 	cmpi.b	#'S,0x800E.w
-	beq.b	CmdStatus
+	beq	CmdStatus
+	cmpi.b	#'D,0x800E.w
+	beq	CmdDriveInit
+	cmpi.b	#'A,0x800E.w
+	beq	CmdPlayAudio
+	cmpi.b	#'X,0x800E.w
+	beq	CmdStopAudio
 
 	move.b	#'E,0x800F.w		/* sub comm port = ERROR */
 WaitAck:
@@ -68,6 +74,32 @@ CmdStatus:
 	move.b	#'S,0x800F.w		/* sub comm port = done, status */
 	bra.b	WaitAck
 
+CmdDriveInit:
+	lea	drive_init_parms(pc),a0
+	move.w	#0x0010,d0		/* DRVINIT, see SegaCDMode1PCM/cd/crt.s:44 */
+	jsr	0x5F22.w		/* call CDBIOS function */
+	move.b	#'D,0x800F.w		/* sub comm port = done, drive init */
+	bra	WaitAck
+
+CmdPlayAudio:
+	move.w	#0x0002,d0		/* MSCSTOP - stop playing, see SegaCDMode1PCM/cd/crt.s:130 */
+	jsr	0x5F22.w		/* call CDBIOS function */
+
+	move.w	0x8010.w,d1		/* argument word: track number */
+	lea	track_number(pc),a0
+	move.w	d1,(a0)
+	move.w	#0x0013,d0		/* MSCPLAYR - play with repeat, see SegaCDMode1PCM/cd/crt.s:138 */
+	jsr	0x5F22.w		/* call CDBIOS function */
+
+	move.b	#'A,0x800F.w		/* sub comm port = done, play audio */
+	bra	WaitAck
+
+CmdStopAudio:
+	move.w	#0x0002,d0		/* MSCSTOP - stop playing, see SegaCDMode1PCM/cd/crt.s:151 */
+	jsr	0x5F22.w		/* call CDBIOS function */
+	move.b	#'X,0x800F.w		/* sub comm port = done, stop audio */
+	bra	WaitAck
+
 | Sub-CPU Program VBlank (INT02) Service Handler
 
 SPInt2:
@@ -77,6 +109,15 @@ SPInt2:
 
 SPNull:
 	rts
+
+| Sub-CPU variables
+
+	.align	2
+drive_init_parms:
+	.byte	0x01, 0xFF		/* first track (1), last track (all) */
+
+track_number:
+	.word	0
 
 	.global	_start
 _start:

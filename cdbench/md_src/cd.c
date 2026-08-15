@@ -41,15 +41,23 @@ extern const uint8_t Sub_End[];
 #define CD_REG_TIMEOUT       2000000u
 #define CD_HANDSHAKE_TIMEOUT 2000000u
 #define CD_CMD_TIMEOUT       100000u
+/* DRVINIT spins the drive motor up and reads the TOC off the disc, ten times
+ * slower again than the handshake bound above; a stuck sub-CPU (or a drive
+ * with no disc that never comes ready) times out here rather than in the
+ * BIOS itself, which is the only way this stays bounded. */
+#define CD_DRVINIT_TIMEOUT   20000000u
 
 #define CD_PING_WORD 0x1234u
+/* Track to loop once the disc is spinning; the disc image built alongside
+ * this ROM is audio-only and starts at track 1. */
+#define CD_AUDIO_TRACK 1u
 
 static volatile uint16_t *const vdp_ctrl_port = (uint16_t *)0xC00004;
 
 /* Last state of the VDP's vblank flag that cd_int2_tick() below acted on. */
 static uint16_t cd_last_vb = 8;
 
-/* Modelled on ghzview/md_src/vdp.c's vdp_wait_vblank(): status bit 3 is the
+/* Modelled on game/md_src/vdp.c's vdp_wait_vblank(): status bit 3 is the
  * VDP's vblank flag. Returns at the start of vblank. */
 static void vdp_wait_vblank(void) {
 	while (*vdp_ctrl_port & 8) ;
@@ -169,6 +177,28 @@ static int cd_ping(uint16_t send, uint16_t *got) {
 	*got = CD_RESULT0;
 	cd_cmd_ack();
 	return st == 'P' && *got == (uint16_t)~send;
+}
+
+/* 'S' status: BIOS status word into CD_RESULT0, status 'S'. Same round trip
+ * as a ping, just no argument to send. */
+static int cd_status(uint16_t *got) {
+	uint8_t st;
+
+	st = cd_cmd('S', CD_CMD_TIMEOUT);
+	*got = CD_RESULT0;
+	cd_cmd_ack();
+	return st == 'S';
+}
+
+/* 'A' play audio: CD_ARG0 is the track number, sub-CPU plays it looping,
+ * status 'A'. */
+static int cd_play(uint16_t track) {
+	uint8_t st;
+
+	CD_ARG0 = track;
+	st = cd_cmd('A', CD_CMD_TIMEOUT);
+	cd_cmd_ack();
+	return st == 'A';
 }
 
 void cd_run(void) {
@@ -351,22 +381,84 @@ void cd_run(void) {
 		cd_print(12, line);
 	}
 
-	/* ---- 10: steady state -- re-ping every frame ---- */
+	/* ---- 10: drive init -- slow (real disc spin-up), so its own bound ---- */
+	{
+		uint8_t st = cd_cmd('D', CD_DRVINIT_TIMEOUT);
+		cd_cmd_ack();
+
+		n = cd_app(line, 0, "DRIVE INIT ");
+		if (st == 0) {
+			n = cd_app(line, n, "TIMEOUT");
+		} else if (st == 'D') {
+			n = cd_app(line, n, "DONE");
+		} else {
+			n = cd_app(line, n, "STATUS ");
+			n += cd_put_hex(line + n, st, 2);
+		}
+		line[n] = 0;
+		cd_print(13, line);
+	}
+
+	/* ---- 11: read disc status -- the BIOS status word, as a number, so an
+	 * absent, open or unreadable disc shows up instead of a hang ---- */
+	{
+		uint16_t got;
+		ok = cd_status(&got);
+		n = cd_app(line, 0, ok ? "DISC STATUS " : "DISC STATUS FAIL ");
+		n += cd_put_hex(line + n, got, 4);
+		line[n] = 0;
+		cd_print(14, line);
+	}
+
+	/* ---- 12: start the audio track playing, looped ---- */
+	{
+		uint16_t got;
+		uint8_t drive;
+
+		/* The high byte of the BIOS status word says what the drive has:
+		 * 0x40 is an open tray and 0x10 is no disc (SegaCDMode1PCM's
+		 * SPMain checks the same two). Asking either of those to play a
+		 * track and reporting the command as accepted would be a lie, and
+		 * the game will make the same check before it starts music. */
+		cd_status(&got);
+		drive = (uint8_t)(got >> 8);
+
+		if (drive == 0x40 || drive == 0x10) {
+			n = cd_app(line, 0, drive == 0x40 ? "NO PLAY TRAY OPEN" : "NO PLAY NO DISC");
+		} else {
+			ok = cd_play(CD_AUDIO_TRACK);
+			n = cd_app(line, 0, ok ? "PLAY TRACK " : "PLAY TRACK FAIL ");
+			n += cd_put_uint(line + n, CD_AUDIO_TRACK, 1);
+		}
+		line[n] = 0;
+		cd_print(15, line);
+	}
+
+	/* ---- 13: steady state -- ping every frame, and show the BIOS status
+	 * word live. The status is the only visible evidence that audio is
+	 * actually playing rather than merely commanded: it changes as the
+	 * drive changes state, where the play command above only says the
+	 * sub-CPU accepted it. ---- */
 	{
 		uint32_t frame = 0, fails = 0;
+		uint16_t stat = 0;
+
 		for (;;) {
 			uint16_t got;
 			vdp_wait_vblank();
 			cd_int2_tick();
 			if (!cd_ping(CD_PING_WORD, &got)) fails++;
+			cd_status(&stat);
 			frame++;
 
 			n = cd_app(line, 0, "FRAME ");
 			n += cd_put_uint(line + n, frame, 6);
 			n = cd_app(line, n, " FAIL ");
 			n += cd_put_uint(line + n, fails, 6);
+			n = cd_app(line, n, " STAT ");
+			n += cd_put_hex(line + n, stat, 4);
 			line[n] = 0;
-			cd_print(14, line);
+			cd_print(16, line);
 		}
 	}
 }
