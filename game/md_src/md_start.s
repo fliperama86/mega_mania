@@ -4,7 +4,7 @@
  * the vector table and the security PROM blob, and pulls this file's
  * assembled output in with .incbin at ROM offset 0x800. This file only has
  * to get the 68000 running, handshake with both SH-2s, then jump into
- * ghzview's own main(). See docs/hardware-budget.md, section 3, "What a
+ * the game's own main(). See docs/hardware-budget.md, section 3, "What a
  * 32X ROM does to the 68000 side".
  *
  * _mars_startup_blob is the 32X security handshake sequence real hardware

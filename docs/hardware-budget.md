@@ -203,7 +203,7 @@ Identical with the SH-2s loaded and with them parked, so it is not contention
 and not intermittent. VRAM reads back as zero, so nothing is transferred at all.
 The work RAM row is what makes this conclusive: the DMA engine, the trigger
 sequence, the destination and the readback are all fine on this console, and the
-sequence is byte for byte the one `ghzview` uses successfully on the same
+sequence is byte for byte the one the game uses successfully on the same
 hardware. **The 32X adapter does not serve VDP DMA cycles for the cartridge
 windows.**
 
@@ -447,7 +447,7 @@ SH-2 drawing the layer behind it, which is the compositing arrangement this
 document argues for, proven with real art. The game logic has moved onto the
 slave SH-2: the 68000 keeps the VDP and gives up pad, physics, collision,
 camera and the animator, and the frame reaches it through five comm registers
-rather than a sprite list. See `ghzview/`.
+rather than a sprite list. See `game/`.
 
 Emulator path for the full tower confirmed working, cart first then disc:
 

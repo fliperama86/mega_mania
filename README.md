@@ -18,7 +18,7 @@ architecture that follows from it.
       tile_usage.py analysis: which tiles actually carry a map
       collision_preview.py  draws the collision masks over the converted art
 
-    ghzview/        32X ROM: a converted stage with Sonic on it
+    game/           the game: a 32X ROM with the Mega CD under it
       md_src/       68000: the VDP, sprite emission, tile upload, the assets
       sh_src/       SH-2: pad, physics, collision, camera, animation
     blitbench/      32X benchmark, measures the hardware. Not part of the game.
@@ -32,13 +32,13 @@ architecture that follows from it.
 Toolchain is marsdev, installed at `~/mars` (`make m68k-toolchain-newlib` and
 `make sh-toolchain-newlib` in the marsdev checkout).
 
-Convert a stage and the character, then build the viewer:
+Convert a stage and the character, then build the game:
 
     python3 tools/convert_stage.py /path/to/Data.rsdk GHZ assets/ghz
-    python3 tools/convert_sonic.py /path/to/Data.rsdk assets/sonic ghzview/md_src
-    cd ghzview && make
+    python3 tools/convert_sonic.py /path/to/Data.rsdk assets/sonic game/md_src
+    cd game && make
 
-`convert_sonic.py` also writes `ghzview/md_src/sonic_data.{c,h}`, which are
+`convert_sonic.py` also writes `game/md_src/sonic_data.{c,h}`, which are
 generated and should not be hand edited. `sh_src/sonic_data.h` is a hand-kept
 mirror of the same struct layout with none of the data in it, since the SH-2
 reads the 68000's one copy through the descriptor table; if the generated
@@ -46,7 +46,7 @@ layout changes, that mirror has to be changed to match.
 
 Run it:
 
-    ares --system "Mega 32X" ghzview/ghzview.32x
+    ares --system "Mega 32X" game/megamania.32x
 
 The 32X benchmark is separate:
 

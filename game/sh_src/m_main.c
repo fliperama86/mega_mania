@@ -9,7 +9,7 @@
  *
  * Hw32xInit never sets MARS_VDP_PRIO_32X, so the priority bit stays at its
  * power-on default and the Mega Drive VDP composites in front of this
- * layer, same as ghzview always intended Sonic and the foreground to sit.
+ * layer, same as the game always intended Sonic and the foreground to sit.
  * The slave SH-2 stays idle; there is nothing to share with it yet. */
 
 #include "mars.h"

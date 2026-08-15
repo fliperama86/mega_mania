@@ -8,7 +8,7 @@ TOOLSBIN = $(MARSDEV)/bin
 MDBIN    = $(MARSDEV)/m68k-elf/bin
 SHBIN    = $(MARSDEV)/sh-elf/bin
 
-TARGET  ?= ghzview
+TARGET  ?= megamania
 MDTARGET = md_start
 
 # m68k GCC and Binutils
@@ -43,7 +43,7 @@ MDLIBS   = -L$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(MDCC_VER) -lgcc
 SHLIBS   = -L$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER) -lgcc
 
 # 68000 side stays off -mshort: it is blitbench's choice, not a 32X
-# requirement (docs/hardware-budget.md, section 3), and matching ghzview's
+# requirement (docs/hardware-budget.md, section 3), and matching the game's
 # own prior flags avoids auditing every int in the ported physics.
 MDCCFLAGS  = -m68000 -Wall -Wextra -std=c99 -ffreestanding
 MDCXXFLAGS = -m68000 -Wall -Wextra -std=c++17 -ffreestanding

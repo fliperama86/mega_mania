@@ -12,10 +12,10 @@
 	.endr
 
 		.ascii	"SEGA 32X        "
-		.ascii	"SKYCHASE 2024.04"
-		.ascii	"SAMPLE PROGRAM                                  "
-		.ascii	"SAMPLE PROGRAM                                  "
-		.ascii	"GM CHANGEME-00  "
+		.ascii	"(C)FLIPERAMA    "
+		.ascii	"MEGA MANIA                                      "
+		.ascii	"MEGA MANIA                                      "
+		.ascii	"GM MEGAMANIA-00 "
 		.ascii	"J6              "
 		.long	0x000000
 		.long	0x3FFFFF
