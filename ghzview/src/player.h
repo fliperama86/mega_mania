@@ -20,6 +20,9 @@ typedef struct {
 	Animator animator;
 	uint8_t direction;     /* 0 right, 1 left */
 	uint8_t applyJumpCap;
+	uint8_t justJumped;    /* one-frame pulse from action_jump; main.c reads it
+	                         * to open the camera's vertical dead zone, so
+	                         * player.c never has to know Camera exists */
 	int16_t controlLock;
 	int16_t skidding;
 	/* Animation thresholds carry hysteresis, so they are state, not constants */

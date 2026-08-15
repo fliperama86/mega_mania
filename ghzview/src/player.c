@@ -16,6 +16,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->e.onGround = 0;
 	p->direction = 0;
 	p->applyJumpCap = 0;
+	p->justJumped = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
 	p->minJogVelocity = 0x40000;
@@ -213,6 +214,7 @@ static void action_jump(Player *p)
 	p->e.collisionMode = CMODE_FLOOR;
 	p->skidding = 0;
 	p->applyJumpCap = 1;
+	p->justJumped = 1;
 }
 
 /* Player_HandleAirFriction, then the animation switch from Player_State_Air */
@@ -271,6 +273,7 @@ void player_update(Player *p, uint16_t pad)
 	const SonicFrame *f;
 
 	prevPad = pad;
+	p->justJumped = 0;
 
 	if (p->e.onGround) {
 		ground_movement(p, pad);
