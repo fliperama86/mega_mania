@@ -6,8 +6,10 @@ Layout, from RSDKv5 Scene.cpp LoadScene:
     <u8 layerCount>
       per layer: <u8 visible> <string name> <u8 type> <u8 drawGroup>
                  <u16 xsize> <u16 ysize> <u16 parallaxFactor> <u16 scrollSpeed>
-                 <u16 scrollInfoCount> then 6 bytes each
-                 <compressed line scroll> <compressed tile layout>
+                 <u16 scrollInfoCount> then 6 bytes each:
+                   <u16 parallaxFactor> <u16 scrollSpeed> <u8 deform> <u8 unknown>
+                 <compressed line scroll, one scrollInfo index per pixel row>
+                 <compressed tile layout>
 
 Tile entries are u16: bits 0-9 tile index, 10-11 flip, 12-15 solidity.
 """
@@ -54,12 +56,27 @@ class Reader:
         return zlib.decompress(blob)
 
 
+class ScrollInfo:
+    """One 6-byte scroll band: its own parallax factor and drift speed."""
+
+    def __init__(self, parallax, speed, deform, unknown):
+        self.parallax = parallax
+        self.speed = speed
+        self.deform = deform
+        self.unknown = unknown
+
+
 class Layer:
-    def __init__(self, name, w, h, layout):
+    def __init__(self, name, w, h, layout, parallax=0, scroll_speed=0,
+                 scroll_info=None, line_scroll=b""):
         self.name = name
         self.w = w
         self.h = h
         self.layout = layout
+        self.parallax = parallax          # layer-level default
+        self.scroll_speed = scroll_speed  # layer-level default
+        self.scroll_info = scroll_info or []      # list of ScrollInfo bands
+        self.line_scroll = line_scroll    # one scroll_info index per px row
 
     def entry(self, x, y):
         i = (y * self.w + x) * 2
@@ -96,9 +113,14 @@ def load(pack, stage, scene="Scene1.bin"):
         name = r.string()
         r.u8(); r.u8()
         w, h = r.u16(), r.u16()
-        r.u16(); r.u16()
+        parallax, scroll_speed = r.u16(), r.u16()
+        scroll_info = []
         for _ in range(r.u16()):
-            r.p += 6
-        r.compressed()
-        layers[name] = Layer(name, w, h, r.compressed())
+            p, s = r.u16(), r.u16()
+            deform, unknown = r.u8(), r.u8()
+            scroll_info.append(ScrollInfo(p, s, deform, unknown))
+        line_scroll = r.compressed()
+        layout = r.compressed()
+        layers[name] = Layer(name, w, h, layout, parallax, scroll_speed,
+                              scroll_info, line_scroll)
     return layers

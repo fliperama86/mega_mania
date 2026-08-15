@@ -5,7 +5,8 @@ RSDKv5 decompilation is used as reference and as an asset source, not as a
 dependency: the engine here is new, sized for the hardware.
 
 See `docs/hardware-budget.md` for what the hardware measured out at and the
-architecture that follows from it.
+architecture that follows from it, and `docs/green-hill.md` for what is left to
+get one zone working.
 
 ## Layout
 
@@ -18,7 +19,7 @@ architecture that follows from it.
       tile_usage.py analysis: which tiles actually carry a map
       collision_preview.py  draws the collision masks over the converted art
       make_disc.py  music -> a Mega CD audio disc, cue and bin
-      run.sh        build a ROM and run it in ares, disc included
+      run.sh        build a ROM and run it in ares; "mania" runs the original
 
     game/           the game: a 32X ROM with the Mega CD under it
       md_src/       68000: the VDP, sprite emission, tile upload, the assets

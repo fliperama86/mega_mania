@@ -36,3 +36,27 @@ sonic_pal:
 	.global sonic_tiles
 sonic_tiles:
 	.incbin "../assets/sonic/tiles.bin"
+
+| Green Hill's parallax background, produced by tools/convert_bg.py. Read
+| only by the master SH2 (sh_src/bg.c), via the descriptor like everything
+| else above.
+	.global bg_pal
+bg_pal:
+	.incbin "../assets/ghzbg/bg_pal.bin"
+
+| bg_blocks is read a longword at a time by sh_src/bg.c's draw_strip() (see
+| its own comment), which needs this symbol 4-byte aligned -- not otherwise
+| guaranteed, since it just follows whatever .incbin happens to precede it
+| above at whatever length that file is.
+	.balign 4
+	.global bg_blocks
+bg_blocks:
+	.incbin "../assets/ghzbg/bg_blocks.bin"
+
+	.global bg_map
+bg_map:
+	.incbin "../assets/ghzbg/bg_map.bin"
+
+	.global bg_lines
+bg_lines:
+	.incbin "../assets/ghzbg/bg_lines.bin"

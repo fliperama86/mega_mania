@@ -26,6 +26,13 @@ typedef struct {
 	uint32_t ghz_collide;   /* address of ghz_collide[] */
 	uint32_t sonic_frames;  /* address of sonic_frames[] */
 	uint32_t sonic_anims;   /* address of sonic_anims[] */
+	uint32_t ghz_map_w;     /* FG Low width, in 16x16 blocks -- not an
+	                         * address, read directly, no md_addr_to_sh2() */
+	uint32_t ghz_map_h;     /* FG Low height, in 16x16 blocks */
+	uint32_t bg_pal;        /* address of bg_pal[], read by bg.c instead */
+	uint32_t bg_blocks;     /* address of bg_blocks[] */
+	uint32_t bg_map;        /* address of bg_map[] */
+	uint32_t bg_lines;      /* address of bg_lines[] */
 } AssetDescriptor;
 
 /* The 68000 and the SH2 see the same cartridge flash through two different
@@ -41,13 +48,23 @@ static inline const void *md_addr_to_sh2(uint32_t md_addr)
 	return (const void *)(md_addr - 0x880000u + 0x22000000u);
 }
 
+/* Map dimensions, in 16x16 blocks, narrowed from the descriptor's
+ * ghz_map_w/ghz_map_h by assets_init(). path.c's collision and s_main.c's
+ * camera clamp read these instead of keeping their own #define, which is
+ * what used to let the two go out of sync with the converted data (see
+ * descriptor.h's GHZ_MAP_W/GHZ_MAP_H comment). path.c declares its own
+ * matching extern rather than including this file, same as it does for
+ * g_ghz_map/g_ghz_collide below. */
+extern uint16_t g_map_w, g_map_h;
+
 /* Spin-waits on the descriptor-ready flag (COMM2), reads the descriptor
  * table's own offset from COMM12 (still its one-shot 32-bit boot role at
  * this point, before the post-boot per-frame protocol reinterprets that
  * address as two 16-bit halves), resolves every address field through
  * md_addr_to_sh2(), and stores the results for path.c and sonic_anim.c to
- * use (g_ghz_map, g_ghz_collide, g_sonic_frames, g_sonic_anims). Returns
- * screenCenterY unconverted. Call once, before the game loop starts. */
+ * use (g_ghz_map, g_ghz_collide, g_sonic_frames, g_sonic_anims, g_map_w,
+ * g_map_h). Returns screenCenterY unconverted. Call once, before the game
+ * loop starts. */
 uint32_t assets_init(void);
 
 #endif

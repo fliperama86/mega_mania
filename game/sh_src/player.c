@@ -20,6 +20,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->direction = 0;
 	p->applyJumpCap = 0;
 	p->justJumped = 0;
+	p->camAdjustY = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
 	p->minJogVelocity = 0x40000;
@@ -304,5 +305,67 @@ void player_update(Player *p, uint16_t pad)
 
 	if (p->e.onGround) p->applyJumpCap = 0;
 
+	/* Player_LateUpdate's grounded branch (Player.c ~305-310): only touched
+	 * while onGround, so it keeps its last value through a jump, same as the
+	 * original only assigning self->camera->adjustY inside
+	 * "if (self->onGround)". */
+	if (p->e.onGround)
+		p->camAdjustY = (p->animator.anim == ANI_JUMP) ? PHYS_JUMP_OFFSET : 0;
+
 	sonic_process_anim(&p->animator);
+}
+
+/* Zone_HandlePlayerBounds, Left/Right/Bottom boundaries (Zone.c ~568-639).
+ * Top and the Death Boundary in between are not ported: this port has no
+ * death/respawn state, so the Bottom clamp below stands in for the original
+ * falling-off-the-map death, rather than being a literal reading of its rule. */
+void player_apply_world_bounds(Player *p, int32_t boundL, int32_t boundR,
+                                int32_t boundB)
+{
+	/* Zone.c ~570-585. hitbox->left is a negative extent (outer.left is too,
+	 * same RSDK convention), so negating it first gives a positive offset,
+	 * matching "-TO_FIXED(1) * playerHitbox->left" without left-shifting a
+	 * negative value. No auto-scroll here (Zone->autoScrollSpeed is always 0
+	 * for this act), so the velocity floor Zone.c applies to autoScrollSpeed
+	 * floors to 0 instead. */
+	int32_t offsetL = (-(int32_t)p->e.outer.left) << 16;
+	if (p->e.x - offsetL <= boundL) {
+		p->e.x = boundL + offsetL;
+		if (p->e.onGround) {
+			if (p->e.groundVel < 0) {
+				p->e.velX = 0;
+				p->e.groundVel = 0;
+			}
+		} else if (p->e.velX < 0) {
+			p->e.velX = 0;
+			p->e.groundVel = 0;
+		}
+	}
+
+	/* Zone.c ~588-608, the mirror of the left boundary using the box's right
+	 * extent, which is already a positive offset. */
+	{
+		int32_t offsetR = (int32_t)p->e.outer.right << 16;
+		if (p->e.x + offsetR >= boundR) {
+			p->e.x = boundR - offsetR;
+			if (p->e.onGround) {
+				if (p->e.groundVel > 0) {
+					p->e.velX = 0;
+					p->e.groundVel = 0;
+				}
+			} else if (p->e.velX > 0) {
+				p->e.velX = 0;
+				p->e.groundVel = 0;
+			}
+		}
+	}
+
+	/* Zone.c ~632-639. TO_FIXED(20): 20 pixels, 16.16 fixed. */
+#define WORLD_BOUND_MARGIN_Y (20 << 16)
+	if (p->e.y + WORLD_BOUND_MARGIN_Y > boundB) {
+		p->e.y = boundB - WORLD_BOUND_MARGIN_Y;
+		p->e.velY = 0;
+		p->e.onGround = 1;
+	}
+#undef WORLD_BOUND_MARGIN_Y
 }

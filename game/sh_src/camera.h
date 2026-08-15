@@ -21,8 +21,15 @@ void camera_init(Camera *c, int32_t x, int32_t y);
 /* Camera_State_FollowXY, then Camera_LateUpdate's offset.y decay, run in
  * that order every frame (the decay applies to next frame's follow, since
  * FollowXY runs first in the original too). targetX/targetY are the
- * followed entity's position, 16.16 world pixels. */
-void camera_update(Camera *c, int32_t targetX, int32_t targetY);
+ * followed entity's position, 16.16 world pixels.
+ *
+ * adjustY is Player_LateUpdate's self->camera->adjustY (Player.c ~305-310):
+ * the player's jumpOffset while grounded and curled up in the jump anim, 0
+ * otherwise. It is subtracted from targetY before the follow math, so a
+ * positive value settles the camera above the player. player.c computes it
+ * (see Player.camAdjustY) and s_main.c passes it through here, so player.c
+ * never has to know Camera exists. */
+void camera_update(Camera *c, int32_t targetX, int32_t targetY, int32_t adjustY);
 
 /* Player_Action_Jump: opens the vertical dead zone so the jump impulse
  * doesn't yank the screen. Called from s_main.c when the player just jumped,

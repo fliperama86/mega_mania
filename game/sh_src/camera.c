@@ -30,10 +30,10 @@ void camera_open_y_offset(Camera *c)
  * objects (Camera_HandleHBounds/VBounds, all Zone->cameraBounds*), screen
  * shake, lerp, and the targetMoveVel lookahead (it nets to zero on the
  * target's position there regardless of branch, so it never mattered here).
- * adjustY is for looking up and down, which is not ported, so it is 0. */
-void camera_update(Camera *c, int32_t targetX, int32_t targetY)
+ * adjustY comes from the caller now (see camera.h); it is the player's
+ * jumpOffset while grounded in the curled-up jump animation, 0 otherwise. */
+void camera_update(Camera *c, int32_t targetX, int32_t targetY, int32_t adjustY)
 {
-	int32_t adjustY = 0;
 	int32_t adjust;
 
 	if (targetX <= c->x + OFFSET_X) {

@@ -19,9 +19,12 @@
 
 extern const uint16_t *g_ghz_map;
 extern const uint8_t *g_ghz_collide;
+/* FG Low's size in blocks, published by the 68000 through the descriptor
+ * table and filled in by assets_init() (sh_src/assets.c). Not a local
+ * #define: see md_src/descriptor.h's GHZ_MAP_W comment for why keeping a
+ * second copy of this number here is exactly the bug this is avoiding. */
+extern uint16_t g_map_w, g_map_h;
 
-#define MAP_W  256
-#define MAP_H  128
 #define CELL_SIZE 16   /* the collision grid, not the VDP tile */
 
 #define BLOCK_MASK  0x0FFF
@@ -57,9 +60,13 @@ static int32_t iabs(int32_t v)
 
 static uint16_t cell_at(int32_t cx, int32_t cy)
 {
-	if (cx < 0 || cy < 0 || cx >= MAP_W * CELL_SIZE || cy >= MAP_H * CELL_SIZE)
+	/* g_map_w/g_map_h are uint16_t, but every operand here promotes to
+	 * this build's 32-bit int (confirmed: no -mshort on either CPU)
+	 * before the multiply, same as cx/cy already were, so the row*width
+	 * term (up to 127*1024) never truncates through a 16-bit intermediate. */
+	if (cx < 0 || cy < 0 || cx >= g_map_w * CELL_SIZE || cy >= g_map_h * CELL_SIZE)
 		return 0;
-	return g_ghz_map[(cy / CELL_SIZE) * MAP_W + (cx / CELL_SIZE)];
+	return g_ghz_map[(cy / CELL_SIZE) * g_map_w + (cx / CELL_SIZE)];
 }
 
 /* ---- position finders, one per collision mode ---------------------------- */

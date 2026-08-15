@@ -31,11 +31,14 @@ extern const uint16_t ghz_blocks[];
 extern const uint16_t ghz_map[];
 extern const uint16_t ghz_bgmap[];
 
-#define MAP_W      256          /* blocks, matches convert_stage.py */
+/* blocks; GHZ_MAP_W/GHZ_MAP_H (descriptor.h) are the one definition, also
+ * used to fill the descriptor published to the SH2 below, so this and that
+ * copy can never disagree. */
+#define MAP_W      GHZ_MAP_W
+#define MAP_H      GHZ_MAP_H
 #define MAP_BLOCK_MASK 0x0FFF   /* bits 12-13 carry collision solidity */
 #define MAP_SOLID_FLOOR 0x1000
 #define MAP_SOLID_SIDES 0x2000
-#define MAP_H      128
 #define TILE_BASE  TILE_USERINDEX
 
 #define VIEW_BLOCKS_X 32        /* 64 cells */

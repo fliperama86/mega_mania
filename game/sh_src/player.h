@@ -33,6 +33,14 @@ typedef struct {
 	uint8_t justJumped;    /* one-frame pulse from action_jump; s_main.c reads
 	                         * it to open the camera's vertical dead zone, so
 	                         * player.c never has to know Camera exists */
+	int32_t camAdjustY;    /* Player_LateUpdate's self->camera->adjustY
+	                         * (Player.c ~305-310): PHYS_JUMP_OFFSET while
+	                         * grounded and curled up in the jump anim, 0
+	                         * otherwise; holds its last value while airborne,
+	                         * same as the original only writing it inside
+	                         * "if (self->onGround)". s_main.c forwards it
+	                         * into camera_update, so player.c never has to
+	                         * know Camera exists either. */
 	int16_t controlLock;
 	int16_t skidding;
 	/* Animation thresholds carry hysteresis, so they are state, not constants */
@@ -53,5 +61,15 @@ typedef struct {
 
 void player_init(Player *p, int32_t x, int32_t y);
 void player_update(Player *p, uint16_t pad);
+
+/* Zone_HandlePlayerBounds (Zone.c ~558-640): clamp the player to the act's
+ * world edges so walking off the map finds a floor instead of falling
+ * forever. boundL/boundR/boundB are 16.16 fixed point, matching e.x/e.y's
+ * scale (the original's Zone->playerBounds* are TO_FIXED too, and are set
+ * from the camera bounds at stage load, per Zone.c ~227-230 - the same
+ * numbers, so callers should pass CAM_BOUND_L/CAM_BOUND_B/the layer width
+ * rather than a second copy of them). */
+void player_apply_world_bounds(Player *p, int32_t boundL, int32_t boundR,
+                                int32_t boundB);
 
 #endif
