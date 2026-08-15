@@ -12,6 +12,9 @@
  *   LEFT   MD hardware sprites: 0, 32, 80
  *   RIGHT  per-line parallax on the MD plane
  *   START  toggle auto ramp, then UP/DOWN set the count by hand
+ *   MODE   per-frame ROM read load on the 68000: off / 2 KB / 32 KB
+ *   Y      switch to the ROM/DMA window diagnostic screen; Y again to
+ *          return here, A on that screen to (re)run it
  */
 
 #include "mars.h"
@@ -371,6 +374,257 @@ static void swap_buffers(void)
 	lastTick = MARS_SYS_COMM12;
 }
 
+/* ROM/DMA window diagnostic -------------------------------------------
+ *
+ * Question 1: does VDP DMA sourced from the 32X ROM windows work, with both
+ * SH-2s under their normal load and with them idle. Question 2: what does
+ * the 68000 reading cartridge ROM every frame cost the SH-2s. The 68000
+ * side (md_src/md_main.c) owns the pattern and the comparison; this side
+ * triggers it and reads back counts.
+ */
+
+#define MD_CMD_DMA_FIXED    0x0B00
+#define MD_CMD_DMA_BANKED   0x0C00
+#define MD_CMD_CPU_FIXED    0x0D00
+#define MD_CMD_CPU_BANKED   0x0E00
+#define MD_CMD_GET_MATCH    0x0F00
+#define MD_CMD_GET_MISSIDX  0x1000
+#define MD_CMD_GET_MISSHI   0x1100
+#define MD_CMD_GET_MISSLO   0x1200
+#define MD_CMD_SET_ROMLOAD  0x1300
+
+#define ROMTEST_LONGS   128    /* must match TEST_LONGS in md_src/md_main.c */
+#define ROMTEST_REPS    32     /* repeats per case, to catch timing-dependent faults */
+#define ROMTEST_SPRITES 64     /* fixed SDRAM-only load size for the "busy" case */
+
+/* Per-frame ROM read volumes for Question 2. SMALL is roughly what a strip
+ * of freshly scrolled-in tiles costs (a couple dozen 32x32 4bpp tiles a
+ * frame); LARGE is a full-screen tile redraw, the worst case a streamer
+ * would ever hit in one frame. Word counts, matching rom_stream_read() on
+ * the 68000 side. */
+#define ROMLOAD_SMALL_WORDS  1024   /* 2 KB/frame */
+#define ROMLOAD_LARGE_WORDS  16384  /* 32 KB/frame */
+
+typedef struct {
+	uint16_t matchCount;
+	uint16_t mismatchIdx;
+	uint32_t mismatchVal;
+} RomTestResult;
+
+typedef struct {
+	uint16_t dmaMatch, cpuMatch;
+	uint16_t dmaMissIdx, cpuMissIdx;
+	uint32_t dmaMissVal, cpuMissVal;
+} RomTestRow;
+
+static RomTestRow romtestRows[4];   /* 0=FIX/BUSY 1=FIX/IDLE 2=BANK/BUSY 3=BANK/IDLE */
+static int romtestHasResult = 0;
+static char row0Text[40];           /* the one-off storage-timing line, saved so it survives a visit to this screen */
+
+static void md_cmd(uint16_t cmd, uint16_t param)
+{
+	while (MARS_SYS_COMM0) ;
+	MARS_SYS_COMM2 = param;
+	MARS_SYS_COMM0 = cmd;
+	while (MARS_SYS_COMM0) ;
+}
+
+static uint16_t md_cmd_result(uint16_t cmd)
+{
+	md_cmd(cmd, 0);
+	return MARS_SYS_COMM8;
+}
+
+/* Cycles and applies the Question 2 per-frame ROM read load: off, small,
+ * large. Shared by the MODE button (six-button pads) and the UP button
+ * (three-button-safe, only while autoRamp is on, see m_main). */
+static int romload_cycle(int romLoadMode)
+{
+	romLoadMode = (romLoadMode + 1) % 3;
+	md_cmd(MD_CMD_SET_ROMLOAD, romLoadMode == 0 ? 0
+	       : (romLoadMode == 1 ? ROMLOAD_SMALL_WORDS : ROMLOAD_LARGE_WORDS));
+	return romLoadMode;
+}
+
+static void md_fetch_result(RomTestResult *r)
+{
+	uint16_t hi, lo;
+	r->matchCount  = md_cmd_result(MD_CMD_GET_MATCH);
+	r->mismatchIdx = md_cmd_result(MD_CMD_GET_MISSIDX);
+	hi = md_cmd_result(MD_CMD_GET_MISSHI);
+	lo = md_cmd_result(MD_CMD_GET_MISSLO);
+	r->mismatchVal = ((uint32_t)hi << 16) | lo;
+}
+
+/* Real concurrent load: kick the slave onto the same SDRAM-only workload the
+ * normal benchmark already uses (SLAVE_SDRAM), then give the master its own
+ * share, so the MD command sandwiched in between genuinely overlaps both
+ * SH-2s working, the same as it would during real gameplay. */
+static void romtest_kick_slave(uint32_t frame)
+{
+	MARS_SYS_COMM6 = (uint16_t)frame;
+	MARS_SYS_COMM4 = SLAVE_BUSY | SLAVE_SDRAM | ROMTEST_SPRITES;
+}
+
+static void romtest_settle_slave(void)
+{
+	(void)sdram_work_lump();
+	while (MARS_SYS_COMM4 & SLAVE_BUSY) ;
+}
+
+static void romtest_run_one(uint16_t dmaCmd, uint16_t cpuCmd, int busy, RomTestRow *row)
+{
+	uint32_t frame = 0;
+	int rep;
+	RomTestResult r;
+
+	row->dmaMatch = ROMTEST_LONGS; row->dmaMissIdx = 0xFFFF; row->dmaMissVal = 0;
+	row->cpuMatch = ROMTEST_LONGS; row->cpuMissIdx = 0xFFFF; row->cpuMissVal = 0;
+
+	for (rep = 0; rep < ROMTEST_REPS; rep++) {
+		if (busy) romtest_kick_slave(frame);
+		md_cmd(dmaCmd, 0);
+		md_fetch_result(&r);
+		if (busy) romtest_settle_slave();
+		if (r.matchCount < row->dmaMatch) row->dmaMatch = r.matchCount;
+		if (r.mismatchIdx != 0xFFFF && row->dmaMissIdx == 0xFFFF) {
+			row->dmaMissIdx = r.mismatchIdx;
+			row->dmaMissVal = r.mismatchVal;
+		}
+
+		if (busy) romtest_kick_slave(frame);
+		md_cmd(cpuCmd, 0);
+		md_fetch_result(&r);
+		if (busy) romtest_settle_slave();
+		if (r.matchCount < row->cpuMatch) row->cpuMatch = r.matchCount;
+		if (r.mismatchIdx != 0xFFFF && row->cpuMissIdx == 0xFFFF) {
+			row->cpuMissIdx = r.mismatchIdx;
+			row->cpuMissVal = r.mismatchVal;
+		}
+
+		frame++;
+	}
+}
+
+/* slaveAlive gates the "busy" reps: if the slave never came up, dispatching
+ * SLAVE_BUSY to it would spin forever waiting for a flag nobody clears. The
+ * "idle" reps never touch the slave and are unaffected either way. */
+static void romtest_run_all(int slaveAlive)
+{
+	romtest_run_one(MD_CMD_DMA_FIXED,  MD_CMD_CPU_FIXED,  slaveAlive, &romtestRows[0]);
+	romtest_run_one(MD_CMD_DMA_FIXED,  MD_CMD_CPU_FIXED,  0, &romtestRows[1]);
+	romtest_run_one(MD_CMD_DMA_BANKED, MD_CMD_CPU_BANKED, slaveAlive, &romtestRows[2]);
+	romtest_run_one(MD_CMD_DMA_BANKED, MD_CMD_CPU_BANKED, 0, &romtestRows[3]);
+	romtestHasResult = 1;
+}
+
+static int put_hex(char *out, uint32_t v, int digits)
+{
+	static const char hx[] = "0123456789ABCDEF";
+	int i;
+	for (i = 0; i < digits; i++)
+		out[i] = hx[(v >> ((digits - 1 - i) * 4)) & 0xF];
+	return digits;
+}
+
+static void clear_text_row(int y)
+{
+	char buf[39];
+	int i;
+	for (i = 0; i < 38; i++) buf[i] = ' ';
+	buf[38] = 0;
+	HwMdPuts(buf, 0x2000, 1, y);
+}
+
+static void romtest_format_row(char *buf, const char *label, const RomTestRow *row)
+{
+	int n = 0;
+	n += put_str(buf, label);
+	n += put_str(buf + n, " D");
+	n += put_uint(buf + n, row->dmaMatch, 3);
+	n += put_str(buf + n, "/");
+	n += put_uint(buf + n, ROMTEST_LONGS, 1);
+	n += put_str(buf + n, " C");
+	n += put_uint(buf + n, row->cpuMatch, 3);
+	n += put_str(buf + n, "/");
+	n += put_uint(buf + n, ROMTEST_LONGS, 1);
+	buf[n] = 0;
+}
+
+/* Shows the first mismatch found, in FIX-BUSY, FIX-IDLE, BANK-BUSY,
+ * BANK-IDLE scan order, DMA before CPU within each. Which row it belongs to
+ * is already visible from the match counts above it. Expected is always
+ * 0xA5A50000 | index, so it is shown from the index rather than sent back
+ * from the 68000 separately. */
+static void romtest_format_miss(char *buf)
+{
+	static const char *labels[4] = {"FIX BUSY", "FIX IDLE", "BNK BUSY", "BNK IDLE"};
+	int i, n;
+
+	for (i = 0; i < 4; i++) {
+		const RomTestRow *row = &romtestRows[i];
+		uint16_t idx = 0xFFFF;
+		uint32_t val = 0;
+		const char *method = 0;
+
+		if (row->dmaMissIdx != 0xFFFF) { idx = row->dmaMissIdx; val = row->dmaMissVal; method = "DMA"; }
+		else if (row->cpuMissIdx != 0xFFFF) { idx = row->cpuMissIdx; val = row->cpuMissVal; method = "CPU"; }
+
+		if (method) {
+			/* Kept under 40 columns: the MD screen is 40 wide and
+			 * anything past that is simply not on the picture. */
+			n = put_str(buf, labels[i]);
+			n += put_str(buf + n, " ");
+			n += put_str(buf + n, method);
+			n += put_str(buf + n, " i");
+			n += put_uint(buf + n, idx, 3);
+			n += put_str(buf + n, " E");
+			n += put_hex(buf + n, 0xA5A50000u | idx, 8);
+			n += put_str(buf + n, " G");
+			n += put_hex(buf + n, val, 8);
+			buf[n] = 0;
+			return;
+		}
+	}
+	n = put_str(buf, "ALL MATCHED, every case ");
+	n += put_uint(buf + n, ROMTEST_LONGS, 1);
+	n += put_str(buf + n, "/");
+	n += put_uint(buf + n, ROMTEST_LONGS, 1);
+	buf[n] = 0;
+}
+
+static void romtest_display(const char *title)
+{
+	char buf[40];
+	int n;
+
+	n = put_str(buf, title);
+	buf[n] = 0;
+	HwMdPuts(buf, 0x2000, 1, 0);
+
+	if (!romtestHasResult) {
+		n = put_str(buf, "press A to run the battery");
+		buf[n] = 0;
+		HwMdPuts(buf, 0x2000, 1, 1);
+		clear_text_row(2);
+		clear_text_row(3);
+		clear_text_row(4);
+		clear_text_row(5);
+		return;
+	}
+
+	romtest_format_row(buf, "FIX BUSY", &romtestRows[0]);
+	HwMdPuts(buf, 0x2000, 1, 1);
+	romtest_format_row(buf, "FIX IDLE", &romtestRows[1]);
+	HwMdPuts(buf, 0x2000, 1, 2);
+	romtest_format_row(buf, "BNK BUSY", &romtestRows[2]);
+	HwMdPuts(buf, 0x2000, 1, 3);
+	romtest_format_row(buf, "BNK IDLE", &romtestRows[3]);
+	HwMdPuts(buf, 0x2000, 1, 4);
+	romtest_format_miss(buf);
+	HwMdPuts(buf, 0x2000, 1, 5);
+}
+
 int m_main(void)
 {
 	uint32_t frame = 0;
@@ -398,6 +652,8 @@ int m_main(void)
 	int prevScrollX[2] = { 0, 0 }, prevScrollY[2] = { 0, 0 };
 	int scrollX = 0, scrollY = 0;
 	int mdSpr = 0, parallax = 0;
+	int uiMode = 0;       /* 0 = benchmark, 1 = ROM/DMA window diagnostic */
+	int romLoadMode = 0;  /* 0 = off, 1 = small per-frame ROM read, 2 = large */
 
 	Hw32xInit(MARS_VDP_MODE_256, 0);
 	/* 32X PWM off. Cycle 0 is a prohibited value, so give it a valid period
@@ -475,6 +731,14 @@ int m_main(void)
 		n += put_uint(textBuf + n, usCopyDma, 4);
 		textBuf[n] = 0;
 		HwMdPuts(textBuf, 0x2000, 1, 0);
+
+		/* Saved so row 0 can be restored after a visit to the ROM/DMA
+		 * diagnostic screen, which reuses this row for its own title. */
+		{
+			int k;
+			for (k = 0; k <= n && k < 39; k++) row0Text[k] = textBuf[k];
+			row0Text[k] = 0;
+		}
 	}
 
 	/* Let the slave purge its cache and come up before handing it work.
@@ -491,12 +755,74 @@ int m_main(void)
 	md_set_sprites(mdSpr);
 	md_set_parallax(parallax);
 
+	/* Question 1 needs no button to reach: run the battery once
+	 * automatically at boot and hold the result on screen until any button
+	 * is pressed. This is required, not cosmetic: read_joypad's three-button
+	 * fallback in md_src/md_start.s (the 0x010F substitution) makes MODE, X,
+	 * Y and Z read as permanently unpressed, so on a three-button pad the Y
+	 * toggle below can never be reached. Any of the buttons that do survive
+	 * the fallback (D-pad, A, B, C, START) dismisses this screen. Y and A
+	 * still work afterward, for repeat runs on a six-button pad. */
+	{
+		int r;
+		romtest_run_all(slaveAlive);
+		for (r = 0; r <= 5; r++) clear_text_row(r);
+		romtest_display("ROMDMA TEST  press any key");
+		/* The result reporting hands values back through COMM8, which is
+		 * also where the joypad arrives, so the first read after a battery
+		 * is a leftover result rather than buttons. Two flush reads put a
+		 * real pad value in both joypad and joypadPrev before the edge test,
+		 * otherwise this screen dismisses itself instantly. */
+		joypad_update();
+		joypad_update();
+		do {
+			joypad_update();
+		} while (!(joypad & (uint16_t)~joypadPrev));
+		for (r = 1; r <= 5; r++) clear_text_row(r);
+		HwMdPuts(row0Text, 0x2000, 1, 0);
+	}
+
 	for (;;) {
 		uint16_t t0, t1;
 		int i, step;
 		uint32_t targetUs = target60 ? 16667 : 33333;
 
 		joypad_update();
+
+		/* Y: switch between the sprite benchmark and the ROM/DMA window
+		 * diagnostic. Checked first and unconditionally so none of the
+		 * benchmark's own buttons (A included) leak through while the
+		 * diagnostic is on screen. Entering the diagnostic suspends the
+		 * per-frame ROM read load (Question 2) so it cannot confound
+		 * Question 1's result; leaving restores whatever load was picked. */
+		if (pressed(SEGA_CTRL_Y)) {
+			int r;
+			uiMode ^= 1;
+			peak = 0;
+			md_set_bg(uiMode ? 0 : (bgMode == 3));
+			md_set_sprites(uiMode ? 0 : mdSpr);
+			md_cmd(MD_CMD_SET_ROMLOAD, uiMode ? 0
+			       : (romLoadMode == 0 ? 0
+			          : (romLoadMode == 1 ? ROMLOAD_SMALL_WORDS : ROMLOAD_LARGE_WORDS)));
+			if (uiMode) {
+				for (r = 0; r <= 5; r++) clear_text_row(r);
+				romtest_display("ROMDMA TEST  A=RUN  Y=BACK");
+			} else {
+				for (r = 1; r <= 5; r++) clear_text_row(r);
+				HwMdPuts(row0Text, 0x2000, 1, 0);
+			}
+		}
+		if (uiMode) {
+			/* The diagnostic screen owns A for itself (re-run) and takes
+			 * over the whole loop body: none of the benchmark's ramp,
+			 * drawing or timing logic below this point runs while it is
+			 * up, and the 32X framebuffer is left exactly as it was. */
+			if (pressed(SEGA_CTRL_A)) {
+				romtest_run_all(slaveAlive);
+				romtest_display("ROMDMA TEST  A=RUN  Y=BACK");
+			}
+			continue;
+		}
 
 		/* Any config change invalidates the peak for the old config */
 		if (pressed(SEGA_CTRL_A)) {
@@ -517,6 +843,14 @@ int m_main(void)
 		if (!autoRamp) {
 			if (pressed(SEGA_CTRL_UP))   nSprites += 8;
 			if (pressed(SEGA_CTRL_DOWN)) nSprites -= 8;
+		} else if (pressed(SEGA_CTRL_UP)) {
+			/* UP only steers nSprites by hand when autoRamp is off, so it is
+			 * idle whenever autoRamp is on. That makes it the three-button-
+			 * safe way to cycle the Question 2 ROM read load: MODE reads as
+			 * permanently unpressed on a three-button pad (read_joypad's
+			 * 0x010F fallback in md_src/md_start.s), but UP survives it. */
+			romLoadMode = romload_cycle(romLoadMode);
+			peak = 0;
 		}
 		/* The MD VDP draws these itself. If the peak does not move when they
 		 * are switched on, they really are free as far as the SH-2s care. */
@@ -528,6 +862,13 @@ int m_main(void)
 		if (pressed(SEGA_CTRL_RIGHT)) {
 			parallax ^= 1;
 			md_set_parallax(parallax);
+			peak = 0;
+		}
+		/* MODE: cycle the Question 2 per-frame ROM read load. Off, then a
+		 * small edge-streaming volume, then a full-screen redraw volume.
+		 * Six-button pads only; UP above does the same job on any pad. */
+		if (pressed(SEGA_CTRL_MODE)) {
+			romLoadMode = romload_cycle(romLoadMode);
 			peak = 0;
 		}
 		if (nSprites < 0) nSprites = 0;
@@ -656,6 +997,12 @@ int m_main(void)
 			n += put_str(textBuf + n, "  MAX ");
 			n += put_uint(textBuf + n, repMax, 5);
 			n += put_str(textBuf + n, autoRamp ? "  AUTO  " : "  MANUAL");
+			/* Which button currently cycles the Question 2 ROM read load:
+			 * UP only works while auto-ramping (it is busy steering the
+			 * count by hand otherwise), MODE always works but needs a
+			 * six-button pad. Shown here, next to AUTO/MANUAL, so the
+			 * active mapping is unambiguous from a single photograph. */
+			n += put_str(textBuf + n, autoRamp ? " UP/MD=RD" : " MD=RD");
 			textBuf[n] = 0;
 			HwMdPuts(textBuf, 0x2000, 1, 3);
 
@@ -670,6 +1017,8 @@ int m_main(void)
 			n += put_str(textBuf + n, "  MDS ");
 			n += put_uint(textBuf + n, (uint32_t)mdSpr, 2);
 			n += put_str(textBuf + n, parallax ? " PX" : "   ");
+			n += put_str(textBuf + n, romLoadMode == 0 ? "  RD OFF"
+			                        : romLoadMode == 1 ? "  RD 2K" : "  RD 32K");
 			textBuf[n] = 0;
 			HwMdPuts(textBuf, 0x2000, 1, 2);
 

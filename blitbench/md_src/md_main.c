@@ -199,6 +199,127 @@ void vdp_color(uint16_t index, uint16_t color) {
 	*vdp_data_port = color;
 }
 
+/* ROM/DMA window diagnostic -------------------------------------------
+ *
+ * Question 1: does VDP DMA sourced from the 32X ROM windows (0x880000
+ * fixed, 0x900000 banked) actually work. Question 2: what does the 68000
+ * reading cartridge ROM every frame cost the SH-2s. sh_src/m_main.c drives
+ * this from the pad and reports on screen; this side just moves data and
+ * reports counts back through the comm registers.
+ */
+
+#define TEST_LONGS    128        /* one block, 16 tiles' worth at 4bpp */
+#define TEST_WORDS    (TEST_LONGS * 2)
+#define TEST_DMA_VRAM 0x1000     /* scratch, clear of every other VRAM user */
+#define TEST_CPU_VRAM 0x1800
+
+/* Known, self-checking pattern, deliberately left in ROM: no .data
+ * attribute, unlike everything else in this file, because this is exactly
+ * what the window tests are supposed to read through the cartridge. Each
+ * longword is 0xA5A5 in the top half and its own index in the bottom half,
+ * so a wrong source address, a wrapped transfer, or byte-swapped data all
+ * show up as an obviously wrong low half.
+ *
+ * md.ld links this file's ROM region at origin 0x00880000 with no LMA
+ * offset, so &romTestPattern is already a valid 0x880000-window address
+ * with no cross-CPU address math needed. It lands within the first few KB
+ * of md_start.bin, comfortably inside both the 512 KB fixed window and
+ * bank 0 of the 900000 window (bank 0 is what the hardware powers up with,
+ * and nothing here ever touches the bank register at 0xA15104). */
+#define P4(i)  (0xA5A50000u|(uint32_t)(i)),     (0xA5A50000u|(uint32_t)((i)+1)), \
+               (0xA5A50000u|(uint32_t)((i)+2)), (0xA5A50000u|(uint32_t)((i)+3))
+#define P16(i) P4(i), P4((i)+4), P4((i)+8), P4((i)+12)
+#define P64(i) P16(i), P16((i)+16), P16((i)+32), P16((i)+48)
+static const uint32_t romTestPattern[TEST_LONGS] = { P64(0), P64(64) };
+#undef P4
+#undef P16
+#undef P64
+
+static uint16_t testMatchCount  = 0;      /* longwords that matched, 0..TEST_LONGS */
+static uint16_t testMismatchIdx = 0xFFFF; /* 0xFFFF = no mismatch found */
+static uint32_t testMismatchVal = 0;      /* what actually came back, at the first mismatch */
+
+static uint16_t romReadWords = 0;         /* per-frame ROM read volume, in words; 0 = off */
+
+#define ROM_READ_STRIDE  64               /* bytes between successive reads */
+#define ROM_READ_WINDOW  0x40000          /* stays well inside the fixed window */
+
+/* Set the VRAM address for a VDP read (CD1CD0 = 00, vs 01 for a write) */
+__attribute__((section(".data")))
+static void vdp_vram_addr_read(uint16_t addr) {
+	*vdp_ctrl_wide = (((uint32_t)(addr & 0x3FFF)) << 16) | ((addr >> 14) & 3);
+}
+
+/* Kick a Genesis VDP 68k-to-VRAM DMA and wait for it to finish. words is
+ * the transfer length in 16-bit words (0 would mean 65536; not used here). */
+__attribute__((section(".data")))
+static void vdp_dma_from(uint32_t src, uint16_t dest, uint16_t words) {
+	*vdp_ctrl_port = 0x9300 | (words & 0xFF);        /* reg 0x13: length low */
+	*vdp_ctrl_port = 0x9400 | ((words >> 8) & 0xFF);  /* reg 0x14: length high */
+	*vdp_ctrl_port = 0x9500 | ((src >> 1) & 0xFF);    /* reg 0x15: src addr low */
+	*vdp_ctrl_port = 0x9600 | ((src >> 9) & 0xFF);    /* reg 0x16: src addr mid */
+	*vdp_ctrl_port = 0x9700 | ((src >> 17) & 0x7F);   /* reg 0x17: src addr high, bit7=0 selects 68k source */
+	/* CD5 is what actually starts the transfer and it lives in bit 7 of the
+	 * SECOND control word, not the first. Putting it in the first word only
+	 * sets address bit 7 and no DMA ever runs. */
+	*vdp_ctrl_wide = (((uint32_t)(0x4000 | (dest & 0x3FFF))) << 16)
+	               | (((dest >> 14) & 3) | 0x80);
+	while (*vdp_ctrl_port & 2) ;                      /* bit1 = DMA in progress */
+}
+
+/* CPU-write control: read the pattern with ordinary 68000 memory reads and
+ * write it to VRAM with ordinary CPU writes, no DMA hardware involved. If
+ * this passes and the DMA path does not, the fault is in the DMA engine,
+ * not the pattern, the ROM window, the VRAM address, or the readback path. */
+__attribute__((section(".data")))
+static void cpu_upload_pattern(const uint32_t *src, uint16_t vramAddr) {
+	uint16_t i;
+	vdp_vram_addr(vramAddr);
+	for (i = 0; i < TEST_LONGS; i++)
+		*((volatile uint32_t*)vdp_data_port) = src[i];
+}
+
+/* Read TEST_LONGS longwords back from VRAM and compare against the known
+ * pattern. Scans the whole block regardless of where a mismatch starts, so
+ * the match count is a true total rather than just a matching prefix. */
+__attribute__((section(".data")))
+static void vdp_check_pattern(uint16_t vramAddr) {
+	uint16_t i;
+
+	testMatchCount = 0;
+	testMismatchIdx = 0xFFFF;
+	testMismatchVal = 0;
+
+	vdp_vram_addr_read(vramAddr);
+	for (i = 0; i < TEST_LONGS; i++) {
+		uint32_t v = *((volatile uint32_t*)vdp_data_port);
+		uint32_t expect = 0xA5A50000u | i;
+		if (v == expect) {
+			testMatchCount++;
+		} else if (testMismatchIdx == 0xFFFF) {
+			testMismatchIdx = i;
+			testMismatchVal = v;
+		}
+	}
+}
+
+/* Question 2: what a tilemap streamer's per-frame ROM reads cost the SH-2s.
+ * Samples one word every ROM_READ_STRIDE bytes through the fixed window,
+ * wrapping inside ROM_READ_WINDOW, so it touches the requested byte volume
+ * spread across a wide span rather than hammering one cache line. The read
+ * is volatile, so the compiler cannot discard it regardless of the result. */
+__attribute__((section(".data")))
+static void rom_stream_read(uint16_t words) {
+	static uint32_t cursor = 0;
+	volatile uint16_t *base = (volatile uint16_t*)0x00880000;
+	uint16_t i;
+
+	for (i = 0; i < words; i++) {
+		(void)base[(cursor & (ROM_READ_WINDOW - 1)) >> 1];
+		cursor += ROM_READ_STRIDE;
+	}
+}
+
 __attribute__((section(".data")))
 void do_commands(void) {
 	uint16_t cmd = *mars_comm0;
@@ -246,6 +367,39 @@ void do_commands(void) {
 			vdp_vsram_addr(0);
 			*vdp_data_port = 0;
 		}
+		break;
+	case 11: // Run DMA-path test, fixed 0x880000 window
+		vdp_dma_from((uint32_t)romTestPattern, TEST_DMA_VRAM, TEST_WORDS);
+		vdp_check_pattern(TEST_DMA_VRAM);
+		break;
+	case 12: // Run DMA-path test, banked 0x900000 window, bank 0
+		vdp_dma_from(0x00900000u + ((uint32_t)romTestPattern - 0x00880000u),
+		             TEST_DMA_VRAM, TEST_WORDS);
+		vdp_check_pattern(TEST_DMA_VRAM);
+		break;
+	case 13: // Run CPU-write control, fixed window
+		cpu_upload_pattern(romTestPattern, TEST_CPU_VRAM);
+		vdp_check_pattern(TEST_CPU_VRAM);
+		break;
+	case 14: // Run CPU-write control, banked window
+		cpu_upload_pattern((const uint32_t*)(0x00900000u
+		                   + ((uint32_t)romTestPattern - 0x00880000u)), TEST_CPU_VRAM);
+		vdp_check_pattern(TEST_CPU_VRAM);
+		break;
+	case 15: // Report match count
+		*mars_comm8 = testMatchCount;
+		break;
+	case 16: // Report first mismatch index
+		*mars_comm8 = testMismatchIdx;
+		break;
+	case 17: // Report first mismatch value, high 16 bits
+		*mars_comm8 = (uint16_t)(testMismatchVal >> 16);
+		break;
+	case 18: // Report first mismatch value, low 16 bits
+		*mars_comm8 = (uint16_t)(testMismatchVal & 0xFFFF);
+		break;
+	case 19: // Set per-frame ROM read volume, in words; 0 disables it
+		romReadWords = *mars_comm2;
 		break;
 	}
 	*mars_comm0 = 0;
@@ -331,6 +485,7 @@ void main(void) {
 			else bg_scroll_update();
 		}
 		if(mdSprites) { bgScroll++; spr_update(); }
+		if(romReadWords) rom_stream_read(romReadWords);
 		*mars_comm12 = ++timer;
 	}
 }
