@@ -5,8 +5,10 @@ Emits into <outdir>:
     pal.bin      4 palettes of 16 MD colours (BGR333, entry 0 transparent)
     tiles.bin    unique 8x8 4bpp tiles, deduplicated including flips
     blocks.bin   per 16x16 block, 4 name table entries (tile, palette, flips)
-    map_fg.bin   FG Low layout as u16 block indices
+    map_fg.bin   FG Low layout: u16 per cell, bits 0-11 block index,
+                 bit 12 floor solid, bit 13 wall and roof solid (RSDK path A)
     map_bg.bin   BG Outside layout, same format
+    collide.bin  per block, 16 column heights plus angle and flag
 
 Block 0 is blank and block 1 is a visible X, so empty map cells read as sky
 while anything that failed conversion shows up as an obvious marker.
@@ -47,6 +49,34 @@ def md_colour(rgb):
 def md_word(c):
     """MD CRAM word: 0000 BBB0 GGG0 RRR0"""
     return (c[2] << 9) | (c[1] << 5) | (c[0] << 1)
+
+
+def load_collision(pack, stage, paths=1, tiles=1024):
+    """TileConfig.bin: per collision path, per tile, 16 height bytes, 16
+    active bytes, then yFlip, floor/lWall/rWall/roof angles and a flag.
+    Only path 0 and the floor mask are needed for now."""
+    data = pack.read(f"Data/Stages/{stage}/TileConfig.bin")
+    if data is None or data[:3] != b"TIL":
+        return None
+    r = scene.Reader(data)
+    r.p = 4
+    buf = r.compressed()
+
+    out = {}
+    pos = 0
+    for p in range(2):
+        for t in range(tiles):
+            heights = buf[pos:pos + 16]; pos += 16
+            active = buf[pos:pos + 16]; pos += 16
+            yflip = buf[pos]; pos += 1
+            floor = buf[pos]; pos += 1
+            pos += 3                      # lWall, rWall, roof angles
+            flag = buf[pos]; pos += 1
+            if p == 0:
+                cols = bytes(heights[c] if active[c] else 0xFF
+                             for c in range(16))
+                out[t] = (cols, floor, flag, yflip)
+    return out
 
 
 class Tileset:
@@ -201,6 +231,8 @@ def main():
         block_of[t] = len(blocks)
         blocks.append(entries)
 
+    collision = load_collision(pack, stage)
+
     maps = {}
     for tag, layer in used.items():
         w = min(mapw, layer.w) if tag == "fg" else layer.w
@@ -216,6 +248,9 @@ def main():
                     b = block_of.get(t, PLACEHOLDER)
                     if b == PLACEHOLDER:
                         missing += 1
+                    # carry RSDK path A solidity: bit 12 floor, bit 13 sides.
+                    # Without it every decorative flower reads as ground.
+                    b |= layer.entry(x, y) & 0x3000
                 data += struct.pack(">H", b)
         maps[tag] = (w, h, data, missing)
 
@@ -242,6 +277,21 @@ def main():
     for tag, (w, h, data, _) in maps.items():
         with open(f"{out}/map_{tag}.bin", "wb") as f:
             f.write(data)
+
+    if collision:
+        # index aligned with blocks.bin; blank and placeholder are empty
+        with open(f"{out}/collide.bin", "wb") as f:
+            solid = 0
+            for i in range(len(blocks)):
+                t = next((k for k, v in block_of.items() if v == i), None)
+                if t is None or t not in collision:
+                    f.write(b"\xff" * 16 + b"\x00\x00")
+                else:
+                    cols, floor, flag, _ = collision[t]
+                    f.write(cols + bytes([floor, flag]))
+                    if any(c != 0xFF for c in cols):
+                        solid += 1
+            print(f"  collision           {len(blocks)} blocks, {solid} solid")
 
     print(f"stage {stage} -> {out}")
     print(f"  tiles used          {len(keep)}  ({len(exact)} fitted exactly)")

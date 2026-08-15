@@ -10,6 +10,7 @@
  */
 
 #include "md.h"
+#include "pad.h"
 
 extern const uint16_t ghz_pal[];
 extern const uint32_t ghz_tiles[];
@@ -63,8 +64,9 @@ static void draw_block_column(uint16_t blockX)
 
 static void draw_screen(void)
 {
+	uint16_t base = camX >> 4;
 	uint16_t x;
-	for (x = 0; x < VIEW_BLOCKS_X; x++) draw_block_column(x);
+	for (x = 0; x < VIEW_BLOCKS_X; x++) draw_block_column(base + x);
 }
 
 /* The background is small enough to sit in plane B whole, and it scrolls at
@@ -90,8 +92,9 @@ static void draw_background(void)
 int main(void)
 {
 	uint16_t tileCount = (uint16_t)(ghz_tiles_end - ghz_tiles) / 8;
-	uint16_t lastCol;
-	int16_t dir = 0;   /* start still, so the opening screen can be compared */
+	uint16_t lastCol, firstCol;
+	int16_t dir = 0;
+	uint16_t padPrev = 0;
 
 	vdp_init();
 	enable_ints;
@@ -103,23 +106,42 @@ int main(void)
 
 	draw_background();
 	draw_screen();
+	firstCol = 0;
 	lastCol = VIEW_BLOCKS_X - 1;
 
-	/* Auto scroll, turning round at either end of the converted window */
+	/* Drive the camera with the pad so the whole conversion can be looked at */
 	for (;;) {
 		uint16_t limit = (MAP_W - VIEW_BLOCKS_X) * 16u;
+		uint16_t pad = pad_read();
+		uint16_t step = (pad & PAD_C) ? 8 : 2;
 
-		if (dir > 0 && camX >= limit) dir = -2;
-		if (dir < 0 && camX == 0)     dir = 2;
-		camX += dir;
+		(void)dir;
+		if ((pad & PAD_RIGHT) && camX + step <= limit) camX += step;
+		if ((pad & PAD_LEFT)  && camX >= step)         camX -= step;
 
-		/* stream in whatever column just came into view */
+		if ((pad & PAD_UP) && !(padPrev & PAD_UP) && camBlockY > 0) {
+			camBlockY--;
+			draw_background();
+			draw_screen();
+			firstCol = camX >> 4;
+			lastCol = firstCol + VIEW_BLOCKS_X - 1;
+		}
+		if ((pad & PAD_DOWN) && !(padPrev & PAD_DOWN)
+		    && camBlockY + VIEW_BLOCKS_Y < MAP_H) {
+			camBlockY++;
+			draw_background();
+			draw_screen();
+			firstCol = camX >> 4;
+			lastCol = firstCol + VIEW_BLOCKS_X - 1;
+		}
+		padPrev = pad;
+
+		/* stream in whatever column just came into view, either side */
 		{
-			uint16_t need = (camX >> 4) + VIEW_BLOCKS_X - 1;
-			while (lastCol < need) {
-				lastCol++;
-				draw_block_column(lastCol);
-			}
+			uint16_t right = (camX >> 4) + VIEW_BLOCKS_X - 1;
+			uint16_t left  = camX >> 4;
+			while (lastCol < right) draw_block_column(++lastCol);
+			while (firstCol > left)  draw_block_column(--firstCol);
 		}
 
 		vdp_vsync();
