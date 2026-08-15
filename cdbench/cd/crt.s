@@ -78,6 +78,20 @@ CmdDriveInit:
 	lea	drive_init_parms(pc),a0
 	move.w	#0x0010,d0		/* DRVINIT, see SegaCDMode1PCM/cd/crt.s:44 */
 	jsr	0x5F22.w		/* call CDBIOS function */
+
+	/* The fader has to be opened by hand or the drive plays into silence.
+	 * It is the CD-DA attenuator (gate array 0xFF8034), it is not left at
+	 * full by whatever ran before this program, and nothing else here
+	 * touches it. Bit 15 selects master volume, 0x400 is the maximum of
+	 * the 0..1024 range. Same call and same value as the reference's own
+	 * init, SegaCDMode1PCM/cd/crt.s:47. */
+	move.w	#0x0085,d0		/* FDRSET - set audio volume */
+	move.w	#0x8400,d1		/* master volume, full */
+	jsr	0x5F22.w		/* call CDBIOS function */
+
+	move.w	#0x0089,d0		/* CDCSTOP - stop reading data, crt.s:51 */
+	jsr	0x5F22.w		/* call CDBIOS function */
+
 	move.b	#'D,0x800F.w		/* sub comm port = done, drive init */
 	bra	WaitAck
 

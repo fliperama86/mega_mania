@@ -24,6 +24,16 @@ int cd_music_play(uint16_t track);
 /* Stops whatever track is playing. No-op if cd_init() never succeeded. */
 void cd_music_stop(void);
 
+/* The BIOS status word, or 0 if the sub-CPU did not answer. Bit 15 is its
+ * not-ready flag and the high byte is the drive state, 0x01 being playing.
+ * Diagnostic only: nothing in the game's normal path needs it. */
+uint16_t cd_status_word(uint16_t *songs);
+/* How many level 2 interrupts the sub-CPU has actually taken. Diagnostic, but
+ * kept: the game drives INT2 by hand, and this counter standing still while
+ * the game thinks it is poking is exactly the failure that silenced the music
+ * once already. */
+uint16_t cd_int2_count(void);
+
 /* Sub-CPU level 2 interrupt, once per frame. The CD BIOS needs this at
  * roughly vblank rate to keep running; call it from the main loop at the
  * same point the frame already synchronises to vblank (see main.c). Safe to

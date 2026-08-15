@@ -25,6 +25,8 @@ extern const uint8_t Sub_End[];
 #define CD_SUBSTAT       (*(volatile uint8_t  *)0xA1200F)
 #define CD_ARG0          (*(volatile uint16_t *)0xA12010)
 #define CD_RESULT0       (*(volatile uint16_t *)0xA12020)
+#define CD_RESULT1       (*(volatile uint16_t *)0xA12022)
+#define CD_INT2COUNT     (*(volatile uint16_t *)0xA12026)
 
 #define PRG_RAM_BASE     ((uint8_t *)0x420000)
 #define PRG_RAM_SIZE     0x20000u
@@ -85,7 +87,16 @@ void cd_vblank(void) {
 	 * measuring; finding out the other way is. */
 	if (!cd_ready) return;
 
-	cd_int2_tick();
+	/* Pokes outright rather than going through the edge detector. Its
+	 * caller is the game loop, which already runs exactly once a frame and
+	 * calls this at the same point in every one: the vblank flag is high
+	 * every single time, so an edge detector would see no edge and stop
+	 * poking the moment boot finished. That is not hypothetical, it is what
+	 * this did, and the drive went quiet a second into the act with the BIOS
+	 * still reporting a track playing. The rate is the caller's promise
+	 * here, not something to rediscover from the VDP. */
+	CD_GA_INT2 |= 0x0100;
+	cd_last_vb = 8;
 }
 
 /* No libc under -ffreestanding here (see the other ROMs in this repo); the
@@ -225,20 +236,51 @@ int cd_init(void) {
 	return 1;
 }
 
+uint16_t cd_int2_count(void) {
+	return cd_ready ? CD_INT2COUNT : 0;
+}
+
+uint16_t cd_status_word(uint16_t *songs) {
+	uint8_t st;
+	uint16_t got, sng;
+
+	if (songs) *songs = 0;
+	if (!cd_ready) return 0;
+	st = cd_cmd('S', CD_CMD_TIMEOUT);
+	got = CD_RESULT0;
+	sng = CD_RESULT1;
+	cd_cmd_ack();
+	if (st != 'S') return 0;
+	if (songs) *songs = sng;
+	return got;
+}
+
 int cd_music_play(uint16_t track) {
 	uint8_t st, drive;
-	uint16_t got;
+	uint16_t got = 0;
+	uint32_t i;
 
 	if (!cd_ready) return 0;
 
-	/* BIOS status word: high byte 0x40 is an open tray, 0x10 is no disc
-	 * (SegaCDMode1PCM's SPMain checks the same two). Asking either of those
-	 * to play a track and reporting it as started would be a lie. */
-	st = cd_cmd('S', CD_CMD_TIMEOUT);
-	got = CD_RESULT0;
-	cd_cmd_ack();
-	if (st != 'S') return 0;
+	/* Wait for the drive to settle before asking it for anything. Bit 15 of
+	 * the BIOS status word is its not-ready flag, which the reference tests
+	 * with a plain bmi, and drive init leaves it set while the motor spins
+	 * up and the TOC is read. Starting a track underneath that means the
+	 * BIOS is still seeking while the drive is supposed to be playing, and
+	 * what comes out is not music. Bounded like everything else here: a
+	 * drive that never settles costs one wait, once. */
+	for (i = 0; i < CD_DRVINIT_TIMEOUT; i++) {
+		st = cd_cmd('S', CD_CMD_TIMEOUT);
+		got = CD_RESULT0;
+		cd_cmd_ack();
+		if (st != 'S') return 0;
+		if (!(got & 0x8000)) break;
+	}
+	if (i == CD_DRVINIT_TIMEOUT) return 0;
 
+	/* High byte 0x40 is an open tray, 0x10 is no disc (SegaCDMode1PCM's
+	 * SPMain checks the same two). Asking either of those to play a track
+	 * and reporting it as started would be a lie. */
 	drive = (uint8_t)(got >> 8);
 	if (drive == 0x40 || drive == 0x10) return 0;
 

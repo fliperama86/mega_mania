@@ -22,7 +22,7 @@
 
 /* Track to loop once the disc is spinning; the disc image built alongside
  * this ROM by tools/make_disc.py is audio-only and starts at track 1. */
-#define CD_MUSIC_TRACK 1
+#define CD_MUSIC_TRACK 2
 
 extern const uint16_t ghz_pal[];
 extern const uint32_t ghz_tiles[];
@@ -277,11 +277,20 @@ int main(void)
 		 * scrolls under it, so it goes on whichever cell row the top of the
 		 * screen currently lands on rather than on plane row 0. */
 		{
-			char buf[24];
+			char buf[32];
+			uint16_t songs;
 			/* CD digit: 0 none found, 1 brought up, 2 music playing. The
 			 * music has no other visible sign, so without it a silent
 			 * failure and a working disc look identical. */
-			sprintf(buf, "%04X %02X CD%d", frame++, pad, cdState);
+			{
+				uint16_t stat = cd_status_word(&songs);
+				/* CD digit: 0 none, 1 brought up, 2 music started.
+				 * The status word next to it is the drive's own:
+				 * 0100 is playing, 1000 no disc, 4000 tray open,
+				 * and bit 15 is the BIOS still busy. */
+				sprintf(buf, "%04X %02X CD%d %04X", frame++, pad,
+				        cdState, stat);
+			}
 			vdp_puts(VDP_PLAN_A, buf, 1, (camY >> 3) & (PLAN_HEIGHT - 1));
 		}
 
