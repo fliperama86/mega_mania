@@ -399,10 +399,12 @@ built-in speakers, which do it with any game under ares.
 Done: blit budget, CPU split, line-table scrolling, MD VDP sprites and parallax,
 hardware fill, fill overlap, DMA, layer order.
 
-Also done, MD side: a stage converted from the data pack, Player.c's ground and
-air physics, the RSDKv5 tile collision, and Sonic's own sprite on hardware
-sprites with the collision box coming from the animation frame. Running on the
-Neptune at 60 Hz. See `ghzview/`.
+Also done: a stage converted from the data pack, Player.c's ground and air
+physics, the RSDKv5 tile collision, a camera ported from Camera.c, and Sonic's
+own sprite on hardware sprites with the collision box coming from the animation
+frame. Now a 32X ROM, with the Mega Drive drawing the foreground and the master
+SH-2 drawing the layer behind it, which is the compositing arrangement this
+document argues for, proven with real art. See `ghzview/`.
 
 Emulator path for the full tower confirmed working, cart first then disc:
 
@@ -417,9 +419,10 @@ Next, in order:
    `~/Projects/references`, which needs porting from the gendev toolchain to
    marsdev.
 2. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO, measured.
-3. **Move the game logic onto the slave SH-2** and put a 32X layer behind the
-   MD playfield, which is the first time the two halves run together with real
-   art rather than a benchmark.
+3. **Move the game logic onto the slave SH-2.** The 68000 keeps the VDP, since
+   only it can reach it, so the sprite list has to travel from the SH-2 through
+   the framebuffer or the comm registers every frame. That path is the last
+   unmeasured piece of the CPU split.
 4. **One zone end to end**, to get a real cost per act.
 
 Not yet measured, and probably not worth measuring: the Z80 as a sound driver.
