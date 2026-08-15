@@ -31,10 +31,10 @@ static uint16_t skip_atoi(const char **s)
 static uint16_t vsprintf(char *buf, const char *fmt, va_list args)
 {
     char tmp_buffer[12];
-    int16_t i;
+    int32_t i;
     int16_t len;
-    int16_t *ip;
-    uint16_t num;
+    int *ip;
+    uint32_t num;
     char *s;
     const char *hexchars;
     char *str;
@@ -90,7 +90,7 @@ repeat:
         {
             ++fmt;
             // it's the next argument
-            field_width = va_arg(args, int16_t);
+            field_width = va_arg(args, int);
 
             if (field_width < 0)
             {
@@ -109,7 +109,7 @@ repeat:
             {
                 ++fmt;
                 // it's the next argument
-                precision = va_arg(args, int16_t);
+                precision = va_arg(args, int);
             }
 
             if (precision < 0)
@@ -129,7 +129,7 @@ repeat:
                     while(--field_width > 0)
                         *str++ = ' ';
 
-                *str++ = (unsigned char) va_arg(args, int16_t);
+                *str++ = (unsigned char) va_arg(args, int);
 
                 while(--field_width > 0)
                     *str++ = ' ';
@@ -176,7 +176,7 @@ repeat:
 hexa_conv:
                 s = &tmp_buffer[12];
                 *--s = 0;
-                num = va_arg(args, uint16_t);
+                num = va_arg(args, unsigned int);
 
                 if (!num)
                     *--s = '0';
@@ -192,14 +192,14 @@ hexa_conv:
                 break;
 
             case 'n':
-                ip = va_arg(args, int16_t*);
+                ip = va_arg(args, int *);
                 *ip = (str - buf);
                 continue;
 
             case 'u':
                 s = &tmp_buffer[12];
                 *--s = 0;
-                num = va_arg(args, uint16_t);
+                num = va_arg(args, unsigned int);
 
                 if (!num)
                     *--s = '0';
@@ -218,7 +218,7 @@ hexa_conv:
             case 'i':
                 s = &tmp_buffer[12];
                 *--s = 0;
-                i = va_arg(args, int16_t);
+                i = va_arg(args, int);
 
                 if (!i)
                     *--s = '0';

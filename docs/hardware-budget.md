@@ -387,6 +387,21 @@ FRT block before anything else; `mars_start.s` skips it and its interrupt
 handlers omit the bulletin's workaround. Only bites once more than one SH-2
 interrupt source is live, and the two omissions compound.
 
+**The skeleton's printf reads 16 bit arguments, and the game does not build
+with `-mshort`.** marsdev's `string.c` is written for its own Makefile, where
+`-mshort` makes `int` 16 bits, so its `va_arg(args, int16_t)` matches what
+callers push. `game/` deliberately leaves `-mshort` off, and there default
+argument promotion means every integer argument arrives as a 32 bit `int`, so
+that `va_arg` names a type no caller ever passes. It survives one argument and
+misbehaves with three: adding a single extra `%d` to the debug line was enough
+to leave Sonic falling through a stage that had been fine a build earlier, with
+nothing in the diff that looked like it could touch physics. Suspect it whenever
+a change that only touches a debug string breaks something that is not the debug
+string. Fixed here by naming the promoted types, `int` and `unsigned int`, and
+widening the conversion locals to match. The copies under `blitbench/` and
+`cdbench/` are only reached from `-mshort` builds, so they are correct where
+they sit.
+
 **GCC's byte copy can land one byte off, and the 68000 manual does not settle
 it.** A plain `while (n--) *dst++ = *src++;` over `uint8_t*` compiles at -O2 to
 `move.b (%a0)+,(%a0,%d1.l)`: the same address register post-incremented as the
