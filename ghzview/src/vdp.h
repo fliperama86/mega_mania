@@ -97,11 +97,6 @@ void vdp_set_window(uint8_t x, uint8_t y);
 uint16_t vdp_get_palmode();
 uint16_t vdp_get_vblank();
 
-// DMA stuff
-void vdp_dma_vram(uint32_t from, uint16_t to, uint16_t len);
-void vdp_dma_cram(uint32_t from, uint16_t to, uint16_t len);
-void vdp_dma_vsram(uint32_t from, uint16_t to, uint16_t len);
-
 // Tile patterns
 void vdp_tiles_load(volatile const uint32_t *data, uint16_t index, uint16_t num);
 
@@ -130,6 +125,7 @@ void vdp_sprite_add(const VDPSprite *spr);
 void vdp_sprites_add(const VDPSprite *spr, uint16_t num);
 void vdp_sprites_clear();
 void vdp_sprites_update();
+void vdp_sprites_write(const VDPSprite *list, uint16_t count);
 
 // Text
 void vdp_font_load(const uint32_t *tiles);

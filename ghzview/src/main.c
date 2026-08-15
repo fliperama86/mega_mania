@@ -146,26 +146,6 @@ static void draw_background(void)
 	}
 }
 
-/* This skeleton's DMA path only works from ROM: handing it a RAM buffer
- * silently does nothing or corrupts VRAM. Sprites live in RAM, so the table is
- * written with the CPU. Same reason the tile upload and map writes below avoid
- * vdp_tiles_load and vdp_map_vline. */
-static void vram_addr(uint16_t addr)
-{
-	*((volatile uint32_t *)0xC00004) =
-		(((uint32_t)(0x4000 | (addr & 0x3FFF))) << 16) | ((addr >> 14) & 3);
-}
-
-static void sprites_write(const VDPSprite *list, uint16_t count)
-{
-	const uint16_t *w = (const uint16_t *)list;
-	uint16_t i;
-
-	vram_addr(VDP_SPRITE_TABLE);
-	for (i = 0; i < count * 4; i++)
-		*((volatile uint16_t *)0xC00000) = w[i];
-}
-
 /* Turn the camera's 16.16 world position into the screen's top-left corner
  * and clamp it to the map. camera.c only knows about the target it is
  * following, not the map's size, so that clamping belongs here. */
@@ -286,7 +266,7 @@ int main(void)
 		 * accepts a trickle and stalls the 68000 for most of the frame. */
 		vdp_wait_vblank();
 		sonic_upload(&sonic.animator);
-		sprites_write(list, used);
+		vdp_sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
 		vdp_hscroll(VDP_PLAN_B, -(int16_t)(camX >> 1));
 		vdp_vscroll(VDP_PLAN_A, (int16_t)camY);

@@ -1,5 +1,9 @@
 #include "md.h"
 
+/* No DMA in this file: on 32X the VDP DMA engine transfers zero bytes when it
+ * sources from the cartridge ROM windows, silently, so every transfer here
+ * goes through the CPU instead. See ../../docs/hardware-budget.md, section 3. */
+
 const uint32_t TILE_BLANK[8] = {};
 const uint16_t BLANK_DATA[0x80] = {};
 const uint16_t PAL_FadeOut[64] = {
@@ -24,6 +28,7 @@ uint8_t pal_mode;
 extern const uint32_t FONT_TILES[];
 
 static volatile uint16_t* const vdp_data_port = (uint16_t*) 0xC00000;
+static volatile uint32_t* const vdp_data_wide = (uint32_t*) 0xC00000;
 static volatile uint16_t* const vdp_ctrl_port = (uint16_t*) 0xC00004;
 static volatile uint32_t* const vdp_ctrl_wide = (uint32_t*) 0xC00004;
 
@@ -128,39 +133,37 @@ void vdp_set_window(uint8_t x, uint8_t y) {
     *vdp_ctrl_port = 0x9200 | y;
 }
 
-// DMA stuff
+// CPU write helpers, used everywhere a DMA used to be
 
-static void dma_do(uint32_t from, uint16_t len, uint32_t cmd) {
-	// Setup DMA length (in word here)
-    *vdp_ctrl_port = 0x9300 + (len & 0xff);
-    *vdp_ctrl_port = 0x9400 + ((len >> 8) & 0xff);
-    // Setup DMA address
-    from >>= 1;
-    *vdp_ctrl_port = 0x9500 + (from & 0xff);
-    from >>= 8;
-    *vdp_ctrl_port = 0x9600 + (from & 0xff);
-    from >>= 8;
-    *vdp_ctrl_port = 0x9700 + (from & 0x7f);
-    // Enable DMA transfer
-    *vdp_ctrl_wide = cmd;
+// Point the VDP at a VRAM address for the next data port write(s).
+static void vram_addr(uint16_t addr) {
+	*vdp_ctrl_wide = ((0x4000 + (((uint32_t)addr) & 0x3FFF)) << 16) + ((((uint32_t)addr) >> 14) | 0x00);
 }
 
-void vdp_dma_vram(uint32_t from, uint16_t to, uint16_t len) {
-	dma_do(from, len, ((0x4000 + (((uint32_t)to) & 0x3FFF)) << 16) + ((((uint32_t)to) >> 14) | 0x80));
+// Point the VDP at a CRAM address for the next data port write(s).
+static void cram_addr(uint16_t addr) {
+	*vdp_ctrl_wide = ((0xC000 + (((uint32_t)addr) & 0x3FFF)) << 16) + ((((uint32_t)addr) >> 14) | 0x00);
 }
 
-void vdp_dma_cram(uint32_t from, uint16_t to, uint16_t len) {
-	dma_do(from, len, ((0xC000 + (((uint32_t)to) & 0x3FFF)) << 16) + ((((uint32_t)to) >> 14) | 0x80));
-}
-
-void vdp_dma_vsram(uint32_t from, uint16_t to, uint16_t len) {
-	dma_do(from, len, ((0x4000 + (((uint32_t)to) & 0x3FFF)) << 16) + ((((uint32_t)to) >> 14) | 0x90));
+/* Streams count words from src to whichever port was just addressed. Pairs go
+ * out as one longword write, which the VDP data port treats as two sequential
+ * word writes at the current auto-increment, so it costs one bus cycle instead
+ * of two; a trailing odd word falls back to a single word write. */
+static void stream_words(const uint16_t *src, uint16_t count) {
+	while (count >= 2) {
+		*vdp_data_wide = ((uint32_t)src[0] << 16) | src[1];
+		src += 2;
+		count -= 2;
+	}
+	if (count) *vdp_data_port = src[0];
 }
 
 // Tile patterns
 
 void vdp_tiles_load(volatile const uint32_t *data, uint16_t index, uint16_t num) {
-	vdp_dma_vram((uint32_t) data, index << 5, num << 4);
+	uint16_t longs = num << 3; // 8 longwords (32 bytes) per tile
+	vram_addr(index << 5);
+	while (longs--) *vdp_data_wide = *data++;
 }
 
 // Tile maps
@@ -172,12 +175,14 @@ void vdp_map_xy(uint16_t plan, uint16_t tile, uint16_t x, uint16_t y) {
 }
 
 void vdp_map_hline(uint16_t plan, const uint16_t *tiles, uint16_t x, uint16_t y, uint16_t len) {
-	vdp_dma_vram((uint32_t) tiles, plan + ((x + (y << PLAN_WIDTH_SFT)) << 1), len);
+	vram_addr(plan + ((x + (y << PLAN_WIDTH_SFT)) << 1));
+	stream_words(tiles, len);
 }
 
 void vdp_map_vline(uint16_t plan, const uint16_t *tiles, uint16_t x, uint16_t y, uint16_t len) {
 	vdp_set_autoinc(128);
-	vdp_dma_vram((uint32_t) tiles, plan + ((x + (y << PLAN_WIDTH_SFT)) << 1), len);
+	vram_addr(plan + ((x + (y << PLAN_WIDTH_SFT)) << 1));
+	stream_words(tiles, len);
 	vdp_set_autoinc(2);
 }
 
@@ -188,14 +193,16 @@ void vdp_map_fill_rect(uint16_t plan, uint16_t index, uint16_t x, uint16_t y, ui
             tiles[xx] = index;
             index += inc;
         }
-		vdp_dma_vram((uint32_t) tiles, plan + ((x + ((y+yy) << PLAN_WIDTH_SFT)) << 1), w);
+		vram_addr(plan + ((x + ((y+yy) << PLAN_WIDTH_SFT)) << 1));
+		stream_words((const uint16_t *) tiles, w);
     }
 }
 
 void vdp_map_clear(uint16_t plan) {
 	uint16_t addr = plan;
 	while(addr < plan + 0x1000) {
-		vdp_dma_vram((uint32_t) BLANK_DATA, addr, 0x80);
+		vram_addr(addr);
+		stream_words(BLANK_DATA, 0x80);
 		addr += 0x100;
 	}
 }
@@ -203,7 +210,8 @@ void vdp_map_clear(uint16_t plan) {
 // Palettes
 
 void vdp_colors(uint16_t index, const uint16_t *values, uint16_t count) {
-	vdp_dma_cram((uint32_t) values, index << 1, count);
+	cram_addr(index << 1);
+	stream_words(values, count);
     for(uint16_t i = count; i--;) pal_current[index+i] = values[i];
 }
 
@@ -242,7 +250,8 @@ uint16_t vdp_fade_step() {
 			pal_fading = 0;
 			return 0;
 		}
-		vdp_dma_cram((uint32_t) pal_current, 0, 64);
+		cram_addr(0);
+		stream_words(pal_current, 64);
 	}
     return 1;
 }
@@ -270,7 +279,8 @@ void vdp_hscroll(uint16_t plan, int16_t hscroll) {
 
 void vdp_hscroll_tile(uint16_t plan, int16_t *hscroll) {
     vdp_set_autoinc(32);
-    vdp_dma_vram((uint32_t) hscroll, VDP_HSCROLL_TABLE + (plan == VDP_PLAN_A ? 0 : 2), 32);
+    vram_addr(VDP_HSCROLL_TABLE + (plan == VDP_PLAN_A ? 0 : 2));
+    stream_words((const uint16_t *) hscroll, 32);
     vdp_set_autoinc(2);
 }
 
@@ -306,8 +316,16 @@ void vdp_sprites_clear() {
 void vdp_sprites_update() {
 	if(!sprite_count) return;
 	sprite_table[sprite_count - 1].link = 0; // Mark end of sprite list
-	vdp_dma_vram((uint32_t) sprite_table, VDP_SPRITE_TABLE, sprite_count << 2);
+	vdp_sprites_write(sprite_table, sprite_count);
 	sprite_count = 0;
+}
+
+/* Writes a caller-supplied sprite list straight to the sprite table, bypassing
+ * sprite_table/sprite_count. Used by callers that build their own list (a
+ * per-frame character rig, say) instead of going through vdp_sprite_add. */
+void vdp_sprites_write(const VDPSprite *list, uint16_t count) {
+	vram_addr(VDP_SPRITE_TABLE);
+	stream_words((const uint16_t *) list, count << 2);
 }
 
 // Font / Text

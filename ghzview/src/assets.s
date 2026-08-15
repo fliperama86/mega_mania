@@ -33,11 +33,6 @@ ghz_collide:
 sonic_pal:
 	.incbin "../assets/sonic/pal.bin"
 
-| A VRAM DMA that crosses a 128 KB boundary in ROM wraps back inside that
-| block on real hardware. Frames are uploaded one DMA each, so the whole set
-| starts on a boundary and stays under 128 KB, and no single frame can span
-| one.
-	.balign 131072
 	.global sonic_tiles
 sonic_tiles:
 	.incbin "../assets/sonic/tiles.bin"
