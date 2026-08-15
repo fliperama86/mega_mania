@@ -159,10 +159,41 @@ and never touch it again.
 **Neither reference implementation lets the 68000 read the cartridge during
 gameplay at all.** blitbench marks its whole MD-side file `.data` so it runs
 from RAM, and Sega's own 32X Doom does manual CPU writes where VDP DMA would
-have been simpler. Both give the same reason: the 68000 on the cartridge bus
-contends with the SH-2s on the cartridge bus. Neither says DMA from the ROM
-window fails, and neither proves it works. A stage streamer reading map and tile
-data from ROM every frame is exactly the case neither of them tested.
+have been simpler. Both give the same reason: bus contention. Measuring it
+turned up something stronger.
+
+### VDP DMA cannot source from the 32X ROM windows
+
+Measured on the Neptune, 128 longwords of a self-checking pattern, each case
+repeated 32 times:
+
+| Source | DMA | CPU writes |
+| --- | --- | --- |
+| 0x880000, fixed window | **0 / 128** | 128 / 128 |
+| 0x900000, banked window, bank 0 | **0 / 128** | 128 / 128 |
+| MD work RAM | 128 / 128 | 128 / 128 |
+
+Identical with the SH-2s loaded and with them parked, so it is not contention
+and not intermittent. VRAM reads back as zero, so nothing is transferred at all.
+The work RAM row is what makes this conclusive: the DMA engine, the trigger
+sequence, the destination and the readback are all fine on this console, and the
+sequence is byte for byte the one `ghzview` uses successfully on the same
+hardware. **The 32X adapter does not serve VDP DMA cycles for the cartridge
+windows.**
+
+The 68000 reading those windows with ordinary instructions works perfectly,
+which the CPU column shows. So only DMA is lost, not ROM access.
+
+What follows for an MD side that has to upload tiles:
+
+- Character frames and tilesets go to VRAM as CPU writes. Sonic's largest frame
+  is 24 tiles, 768 bytes, about 200 longword writes, which fits in vblank.
+- Where a transfer is big enough to be worth it, copy ROM to work RAM with the
+  CPU and DMA from there, since work RAM is a legal DMA source.
+- Map and block lookups are ordinary reads and are unaffected.
+
+ares passes all six cases, so it is no help here. This is exactly the class of
+thing it gets wrong.
 
 ---
 
