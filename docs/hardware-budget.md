@@ -132,6 +132,38 @@ the restores took it straight to 104.
 The slave prepares frame N+1's sprite list and decompressed tiles in SDRAM while
 the master blits frame N.
 
+### What a 32X ROM does to the 68000 side
+
+Read before converting an MD ROM, because the shape is not negotiable.
+
+The 32X supplies the cartridge header, the vector table and the security PROM
+blob itself: `mars_start.s` emits all of it and pulls the assembled 68000
+program in with `.incbin` at ROM offset 0x800. So an MD ROM's own boot file and
+header get dropped rather than ported, and the 68000 program links at 0x8803F0
+and starts executing at 0x880800.
+
+Once the adapter is live the cartridge is no longer at address zero. The 68000
+sees cartridge offset 0 to 0x7FFFF as a fixed 512 KB window at **0x880000**,
+plus a banked 1 MB window at **0x900000** whose bank is the low two bits of
+**0xA15104**, zero at power on. `md.ld` claiming a 4 MB ROM region is a lie the
+linker will not catch: it will happily place data past the addressable window.
+
+Two things the 68000 must not do while RV is set: read ROM, or take an
+interrupt. Setting RV reverts the 68000 to the original cartridge board so it
+can reach SRAM, which kills the ROM windows and stalls SH-2 reads from the
+cartridge at the same time. Both reference implementations clear RV once at boot
+and never touch it again.
+
+`-mshort` on the 68000 side is blitbench's choice, not a 32X requirement.
+
+**Neither reference implementation lets the 68000 read the cartridge during
+gameplay at all.** blitbench marks its whole MD-side file `.data` so it runs
+from RAM, and Sega's own 32X Doom does manual CPU writes where VDP DMA would
+have been simpler. Both give the same reason: the 68000 on the cartridge bus
+contends with the SH-2s on the cartridge bus. Neither says DMA from the ROM
+window fails, and neither proves it works. A stage streamer reading map and tile
+data from ROM every frame is exactly the case neither of them tested.
+
 ---
 
 ## 4. Techniques
@@ -257,6 +289,13 @@ frame. `vdp_wait_vblank` returns at the start of the interval; put DMA there.
 bytes, occupying 0xFC00 through 0xFF7F, which runs over the default sprite
 attribute table at 0xFE00. Sprites silently vanish. Moved here to 0xF000
 (register 5 = 0x78). Plan the VRAM map before enabling per-line scroll.
+
+**marsdev never initialises the SH-2 free running timer.** Technical Bulletin
+10 says it has to be, interrupts or no interrupts, and Bulletin 27's fix for the
+double-acknowledge erratum depends on it. Sega's own 32X Doom programs the whole
+FRT block before anything else; `mars_start.s` skips it and its interrupt
+handlers omit the bulletin's workaround. Only bites once more than one SH-2
+interrupt source is live, and the two omissions compound.
 
 **Cache alignment is worth a few percent.** The same 104 sprites measured 16.6 ms
 in one build and 17.2 ms in the next, purely from unrelated edits shifting the
