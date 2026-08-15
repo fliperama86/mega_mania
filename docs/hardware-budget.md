@@ -184,6 +184,39 @@ windows.**
 The 68000 reading those windows with ordinary instructions works perfectly,
 which the CPU column shows. So only DMA is lost, not ROM access.
 
+### What 68000 cartridge reads cost the SH-2s
+
+Sprite peak with the 68000 sampling one word every 64 bytes through the fixed
+window, at 60 Hz, two CPUs:
+
+| 68000 ROM reads per frame | Peak sprites |
+| --- | --- |
+| none | 104 |
+| 1024 reads, 2 KB | 96 |
+| 16384 reads, 32 KB | 88, and unusable |
+
+The 32 KB row is past saturation and its number should not be used: sixteen
+thousand windowed reads do not fit in a frame on a 7.6 MHz 68000, so the MD side
+stops answering commands and the whole loop crawls. It marks where the cliff is,
+not a cost.
+
+The 2 KB row is the one that matters, and it is a **7.7% cut**, on a scattered
+access pattern with no locality, which is worse than real streaming.
+
+Against that, what a stage streamer actually reads per frame:
+
+| | bytes |
+| --- | --- |
+| one block column, map plus block entries | 160 |
+| one block row, when the camera crosses vertically | 320 |
+| a character frame's tiles, largest case | 768 |
+| collision sensor lookups | ~200 |
+
+Under 1.5 KB worst case, and most frames stream neither a row nor a column. So a
+tilemap streamer on the 68000 costs the SH-2s under 8% of their sprite budget,
+and the stage data can stay in ROM rather than being staged through the
+framebuffer.
+
 What follows for an MD side that has to upload tiles:
 
 - Character frames and tilesets go to VRAM as CPU writes. Sonic's largest frame
