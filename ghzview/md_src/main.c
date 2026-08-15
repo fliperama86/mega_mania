@@ -125,8 +125,11 @@ static void draw_screen(void)
 	for (x = 0; x < VIEW_BLOCKS_X; x++) draw_block_column(base + x);
 }
 
-/* The background is small enough to sit in plane B whole, and it scrolls at
- * half speed for parallax. Bottom aligned so the horizon meets the ground. */
+/* The background now comes from the 32X framebuffer layer behind the Mega
+ * Drive (see sh_src/m_main.c and docs/hardware-budget.md, section 3, "Layer
+ * order: the MD draws in front"). Kept here, unused, as a record of what
+ * Plane B used to hold. */
+__attribute__((unused))
 static void draw_background(void)
 {
 	uint16_t x, y;
@@ -174,7 +177,11 @@ int main(void)
 
 	vdp_init();
 	pad_init();
-	enable_ints;
+	/* 68000 interrupts stay off: on 32X the vector table belongs to
+	 * sh_src/mars_start.s, not this program, and Technical Bulletin 9
+	 * forbids taking an interrupt while RV is set (see
+	 * docs/hardware-budget.md, section 3). vdp_wait_vblank below already
+	 * polls the VDP status the same way an interrupt handler would have. */
 
 	/* three palettes for the stage, the fourth is Sonic's */
 	vdp_colors(0, ghz_pal, 48);
@@ -192,7 +199,6 @@ int main(void)
 	vdp_map_clear(VDP_PLAN_A);
 	vdp_map_clear(VDP_PLAN_B);
 
-	draw_background();
 	draw_screen();
 
 	for (;;) {

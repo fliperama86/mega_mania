@@ -1,122 +1,166 @@
-# Sample Makefile for Marsdev (No SGDK, No Newlib)
+# Sample Makefile for Marsdev (32X version)
+# For 32X both m68k and SH-2 code has to be built
+# The usual variables are split into "MD" and "SH" versions
 
 # Default paths, can be overridden by setting MARSDEV before calling make
-MARSDEV ?= $(HOME)/mars
-MARSBIN  = $(MARSDEV)/m68k-elf/bin
+MARSDEV ?= ${HOME}/mars
+TOOLSBIN = $(MARSDEV)/bin
+MDBIN    = $(MARSDEV)/m68k-elf/bin
+SHBIN    = $(MARSDEV)/sh-elf/bin
 
-# GCC and Binutils
-CC   = $(MARSBIN)/m68k-elf-gcc
-CXX  = $(MARSBIN)/m68k-elf-g++
-AS   = $(MARSBIN)/m68k-elf-as
-LD   = $(MARSBIN)/m68k-elf-ld
-NM   = $(MARSBIN)/m68k-elf-nm
-OBJC = $(MARSBIN)/m68k-elf-objcopy
+TARGET  ?= ghzview
+MDTARGET = md_start
+
+# m68k GCC and Binutils
+MDCC   = $(MDBIN)/m68k-elf-gcc
+MDCXX  = $(MDBIN)/m68k-elf-g++
+MDAS   = $(MDBIN)/m68k-elf-as
+MDLD   = $(MDBIN)/m68k-elf-ld
+MDNM   = $(MDBIN)/m68k-elf-nm
+MDOBJC = $(MDBIN)/m68k-elf-objcopy
+# sh2 GCC and Binutils
+SHCC   = $(SHBIN)/sh-elf-gcc
+SHCXX  = $(SHBIN)/sh-elf-g++
+SHAS   = $(SHBIN)/sh-elf-as
+SHLD   = $(SHBIN)/sh-elf-ld
+SHNM   = $(SHBIN)/sh-elf-nm
+SHOBJC = $(SHBIN)/sh-elf-objcopy
 
 # Some files needed are in a versioned directory
-GCC_VER := $(shell $(CC) -dumpversion)
+MDCC_VER := $(shell $(MDCC) -dumpversion)
+SHCC_VER := $(shell $(SHCC) -dumpversion)
 
-# Need the LTO plugin path so NM can dump our symbol table
-PLUGIN   = $(MARSDEV)/m68k-elf/libexec/gcc/m68k-elf/$(GCC_VER)
-LTO_SO   = liblto_plugin.so
-ifeq ($(OS),Windows_NT)
-	LTO_SO = liblto_plugin-0.dll
-endif
+# Need the LTO plugin so NM can dump our symbol table
+MDPLUGIN = $(MARSDEV)/m68k-elf/libexec/gcc/m68k-elf/$(MDCC_VER)/liblto_plugin.so
+SHPLUGIN = $(MARSDEV)/sh-elf/libexec/gcc/sh-elf/$(SHCC_VER)/liblto_plugin.so
 
-# Includes: Local + GCC
-INCS     = -Isrc -Ires -Iinc
-INCS    += -I$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(GCC_VER)/include
+MDINCS   = -Imd_src
+MDINCS  += -I$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(MDCC_VER)/include
+SHINCS   = -Ish_src
+SHINCS  += -I$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER)/include
 
-# Libraries: GCC Only
-LIBS     = -L$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(GCC_VER) -lgcc
+MDLIBS   = -L$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(MDCC_VER) -lgcc
+SHLIBS   = -L$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER) -lgcc
 
-# Any C or C++ standard should be fine here as long as GCC supports it
-# GCC 10+ by default fails to link if you don't declare header variables extern,
-# and -fcommon reverts to the old behavior (needed to compile SGDK)
-CCFLAGS  = -m68000 -Wall -Wextra -std=c99 -ffreestanding
-CXXFLAGS = -m68000 -Wall -Wextra -std=c++17 -ffreestanding
+# 68000 side stays off -mshort: it is blitbench's choice, not a 32X
+# requirement (docs/hardware-budget.md, section 3), and matching ghzview's
+# own prior flags avoids auditing every int in the ported physics.
+MDCCFLAGS  = -m68000 -Wall -Wextra -std=c99 -ffreestanding
+MDCXXFLAGS = -m68000 -Wall -Wextra -std=c++17 -ffreestanding
+SHCCFLAGS  = -m2 -mb -Wall -Wextra -pedantic -std=c99 -ffreestanding
+SHCXXFLAGS = -m2 -mb -Wall -Wextra -pedantic -std=c++17 -ffreestanding
 
-# Another useful GAS flag is --bitwise-or, but it breaks SGDK
-ASFLAGS  = -m68000 --register-prefix-optional
+# Assembler flags
+MDASFLAGS  = -m68000 --register-prefix-optional
+SHASFLAGS  = -Ish_src --small
 
-# -nostartfiles disables the c runtime startup code
-# -nostdlib unsets -lc, so when using Newlib don't set that option
-LDFLAGS  = -T megadrive.ld -nostdlib
+# Linker flags
+MDLDFLAGS  = -T md_src/md.ld -nostdlib
+SHLDFLAGS  = -T sh_src/mars.ld -nostdlib
 
-# Collect source files in the src directory
-CS    = $(wildcard src/*.c)
-CPPS  = $(wildcard src/*.cpp)
-SS    = $(wildcard src/*.s)
-OBJS  = $(CS:.c=.o)
-OBJS += $(CPPS:.cpp=.o)
-OBJS += $(SS:.s=.o)
+# Extra options set by debug or release target
+MDEXTRA =
+SHEXTRA =
 
-ASMO  = $(RESS:.res=.o)
-ASMO += $(Z80S:.s80=.o)
-ASMO += $(CS:%.c=asmout/%.s)
+# Generate m68k object target list
+MDSS    = $(wildcard md_src/*.s)
+MDCS    = $(wildcard md_src/*.c)
+MDCPPS  = $(wildcard md_src/*.cpp)
+MDOBJS  = $(MDSS:.s=.o)
+MDOBJS += $(MDCS:.c=.o)
+MDOBJS += $(MDCPPS:.cpp=.o)
 
-.PHONY: all release asm debug
+# Generate sh object target list
+SHSS    = $(wildcard sh_src/*.s)
+SHCS    = $(wildcard sh_src/*.c)
+SHCPPS  = $(wildcard sh_src/*.cpp)
+SHOBJS  = $(SHSS:.s=.o)
+SHOBJS += $(SHCS:.c=.o)
+SHOBJS += $(SHCPPS:.cpp=.o)
+
+.PHONY: all release debug
+
 all: release
 
-release: OPTIONS  = -O3 -fno-web -fno-gcse -fno-unit-at-a-time -fomit-frame-pointer
-release: OPTIONS += -fshort-enums -flto -fuse-linker-plugin
-release: out.bin symbol.txt
-
-asm: OPTIONS  = -O3 -fno-web -fno-gcse -fno-unit-at-a-time -fomit-frame-pointer
-asm: OPTIONS += -fshort-enums
-asm: asm-dir $(ASMO)
+release: MDEXTRA  = -O3 -fno-web -fno-gcse -fno-unit-at-a-time -fomit-frame-pointer -fshort-enums -flto -fuse-linker-plugin
+release: SHEXTRA  = -Ofast -fomit-frame-pointer -flto -fuse-linker-plugin
+release: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
 
 # Gens-KMod, BlastEm and UMDK support GDB tracing, enabled by this target
-debug: OPTIONS = -g -Og -DDEBUG -DKDEBUG
-debug: out.bin symbol.txt
+debug: MDEXTRA = -g -Og -DDEBUG -DKDEBUG
+debug: SHEXTRA = -g -Og -DDEBUG -DKDEBUG
+debug: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
 
-# Generates a symbol table that is very helpful in debugging crashes
-# Cross reference symbol.txt with the addresses displayed in the crash handler
-symbol.txt: out.bin
-	@echo "Creating symbol.txt"
-	@$(NM) --plugin=$(PLUGIN)/$(LTO_SO) -n out.elf > symbol.txt
+# Symbol listings for both CPUs
+$(MDTARGET).lst: $(MDTARGET).elf
+	$(MDNM) --plugin=$(MDPLUGIN) -n $< > $@
 
-%.bin: %.elf
-	@echo "Stripping ELF header..."
-	@$(OBJC) -O binary $< temp.bin
-	@dd if=temp.bin of=$@ bs=8K conv=sync
-	@rm -f temp.bin
+$(TARGET).lst: $(TARGET).elf
+	$(SHNM) --plugin=$(SHPLUGIN) -n $< > $@
 
-%.elf: $(OBJS)
-	@echo "Linking $@"
-	@$(CC) -o $@ $(LDFLAGS) $(OBJS) $(LIBS)
+# m68k stuff
 
-%.o: %.c
-	@echo "CC $<"
-	@$(CC) $(CCFLAGS) $(OPTIONS) $(INCS) -c $< -o $@
+$(MDTARGET).bin: $(MDTARGET).elf
+	@echo "Stripping ELF header from M68K program"
+	@$(MDOBJC) -O binary $< $@
 
-%.o: %.cpp
-	@echo "CXX $<"
-	@$(CXX) $(CXXFLAGS) $(OPTIONS) $(INCS) -c $< -o $@
+$(MDTARGET).elf: $(MDOBJS)
+	$(MDCC) $(MDLDFLAGS) $^ -o $@ $(MDLIBS)
 
-%.o: %.s 
-	@echo "AS $<"
-	@$(AS) $(ASFLAGS) $< -o $@
+md_src/%.o: md_src/%.s
+	@echo "MDAS $<"
+	@$(MDAS) $(MDASFLAGS) $< -o $@
 
-# For asm target
-asm-dir:
-	mkdir -p asmout/src
+md_src/%.o: md_src/%.c
+	@echo "MDCC $<"
+	@$(MDCC) $(MDCCFLAGS) $(MDEXTRA) $(MDINCS) -c $< -o $@
 
-asmout/%.s: %.c
-	$(CC) $(CCFLAGS) $(OPTIONS) $(INCS) -S $< -o $@
+md_src/%.o: md_src/%.cpp
+	@echo "MDCXX $<"
+	@$(MDCXX) $(MDCXXFLAGS) $(MDEXTRA) $(MDINCS) -c $< -o $@
+
+# sh2 stuff
+
+$(TARGET).32x: $(TARGET).elf
+	@echo "Stripping ELF header from SH-2 program"
+	@$(SHOBJC) -O binary $< temp.32x
+	@dd if=temp.32x of=$@ bs=8192 conv=sync
+	@rm -f temp.32x
+
+$(TARGET).elf: $(SHOBJS)
+	$(SHCC) $(SHLDFLAGS) $^ -o $@ $(SHLIBS)
+
+# mars_start.s pulls the assembled 68000 program in with .incbin, so it has to
+# be re-assembled whenever that binary changes. Without this the ROM silently
+# keeps an old copy of the MD side.
+sh_src/mars_start.o: $(MDTARGET).bin
+
+sh_src/%.o: sh_src/%.s
+	@echo "SHAS $<"
+	@$(SHAS) $(SHASFLAGS) $< -o $@
+
+sh_src/%.o: sh_src/%.c
+	@echo "SHCC $<"
+	@$(SHCC) $(SHCCFLAGS) $(SHEXTRA) $(SHINCS) -c $< -o $@
+
+sh_src/%.o: sh_src/%.cpp
+	@echo "SHCXX $<"
+	@$(SHCXX) $(SHCXXFLAGS) $(SHEXTRA) $(SHINCS) -c $< -o $@
 
 .PHONY: clean
-clean:
-	rm -f $(OBJS) out.bin out.elf symbol.txt boot.o
-	rm -rf asmout
 
-# assets.s pulls the converted data in with .incbin, so it has to be
-# re-assembled whenever that data changes. Without this the ROM silently keeps
-# an old copy, exactly the trap marsdev's own Makefile has.
+clean:
+	rm -f $(MDOBJS) $(SHOBJS)
+	rm -f $(MDTARGET).bin $(MDTARGET).elf $(MDTARGET).lst
+	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
+
+# assets.s pulls the converted stage/character data in with .incbin, so it has
+# to be re-assembled whenever that data changes. Without this the ROM silently
+# keeps an old copy, the same trap as md_start.bin above.
 #
-# The empty recipe matters: without it these .bin files match the ROM's own
-# %.bin pattern rule and make happily overwrites the assets with copies of the
-# ROM.
+# The empty recipe matters: without it these .bin files would be treated as
+# buildable targets in their own right instead of being left alone as source
+# data, which has cost this project hours before.
 RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin)
 $(RES): ;
-src/assets.o: $(RES)
-
+md_src/assets.o: $(RES)
