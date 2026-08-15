@@ -202,10 +202,13 @@ void vdp_color(uint16_t index, uint16_t color) {
 /* ROM/DMA window diagnostic -------------------------------------------
  *
  * Question 1: does VDP DMA sourced from the 32X ROM windows (0x880000
- * fixed, 0x900000 banked) actually work. Question 2: what does the 68000
- * reading cartridge ROM every frame cost the SH-2s. sh_src/m_main.c drives
- * this from the pad and reports on screen; this side just moves data and
- * reports counts back through the comm registers.
+ * fixed, 0x900000 banked) actually work, with a DMA-from-MD-work-RAM case
+ * alongside it as a control (work RAM is not on the cartridge bus, so it
+ * isolates the DMA engine itself from anything specific to the ROM
+ * windows). Question 2: what does the 68000 reading cartridge ROM every
+ * frame cost the SH-2s. sh_src/m_main.c drives this from the pad and
+ * reports on screen; this side just moves data and reports counts back
+ * through the comm registers.
  */
 
 #define TEST_LONGS    128        /* one block, 16 tiles' worth at 4bpp */
@@ -243,6 +246,22 @@ static uint16_t romReadWords = 0;         /* per-frame ROM read volume, in words
 
 #define ROM_READ_STRIDE  64               /* bytes between successive reads */
 #define ROM_READ_WINDOW  0x40000          /* stays well inside the fixed window */
+
+/* Control case: the same pattern, but in MD work RAM rather than on the
+ * cartridge. Work RAM is not on the cartridge bus at all, so if DMA from
+ * here succeeds while both ROM windows fail, the finding is airtight: the
+ * 32X adapter is not serving VDP DMA cycles from the cartridge windows. If
+ * this also fails, the DMA setup itself is still wrong somewhere, and the
+ * ROM window is exonerated. Ordinary writable .data, unlike romTestPattern:
+ * this one is meant to live in RAM, not ROM. */
+static uint32_t romTestPatternRAM[TEST_LONGS];
+
+__attribute__((section(".data")))
+static void ram_pattern_init(void) {
+	uint16_t i;
+	for (i = 0; i < TEST_LONGS; i++)
+		romTestPatternRAM[i] = 0xA5A50000u | i;
+}
 
 /* Set the VRAM address for a VDP read (CD1CD0 = 00, vs 01 for a write) */
 __attribute__((section(".data")))
@@ -401,6 +420,14 @@ void do_commands(void) {
 	case 19: // Set per-frame ROM read volume, in words; 0 disables it
 		romReadWords = *mars_comm2;
 		break;
+	case 20: // Run DMA-path test, MD work RAM source (control, off the cartridge bus)
+		vdp_dma_from((uint32_t)romTestPatternRAM, TEST_DMA_VRAM, TEST_WORDS);
+		vdp_check_pattern(TEST_DMA_VRAM);
+		break;
+	case 21: // Run CPU-write control, MD work RAM source
+		cpu_upload_pattern(romTestPatternRAM, TEST_CPU_VRAM);
+		vdp_check_pattern(TEST_CPU_VRAM);
+		break;
 	}
 	*mars_comm0 = 0;
 }
@@ -468,6 +495,7 @@ void main(void) {
 	uint16_t ticks = 0, col = 0;
 
 	audio_silence();
+	ram_pattern_init();
 	while(1) {
 		// Cycle the backdrop while idle. With the background plane on, hold a
 		// steady dark colour instead: it doubles as confirmation that the

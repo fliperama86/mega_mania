@@ -392,6 +392,8 @@ static void swap_buffers(void)
 #define MD_CMD_GET_MISSHI   0x1100
 #define MD_CMD_GET_MISSLO   0x1200
 #define MD_CMD_SET_ROMLOAD  0x1300
+#define MD_CMD_DMA_RAM      0x1400
+#define MD_CMD_CPU_RAM      0x1500
 
 #define ROMTEST_LONGS   128    /* must match TEST_LONGS in md_src/md_main.c */
 #define ROMTEST_REPS    32     /* repeats per case, to catch timing-dependent faults */
@@ -417,7 +419,7 @@ typedef struct {
 	uint32_t dmaMissVal, cpuMissVal;
 } RomTestRow;
 
-static RomTestRow romtestRows[4];   /* 0=FIX/BUSY 1=FIX/IDLE 2=BANK/BUSY 3=BANK/IDLE */
+static RomTestRow romtestRows[6];   /* 0=FIX/BUSY 1=FIX/IDLE 2=BANK/BUSY 3=BANK/IDLE 4=RAM/BUSY 5=RAM/IDLE */
 static int romtestHasResult = 0;
 static char row0Text[40];           /* the one-off storage-timing line, saved so it survives a visit to this screen */
 
@@ -508,13 +510,21 @@ static void romtest_run_one(uint16_t dmaCmd, uint16_t cpuCmd, int busy, RomTestR
 
 /* slaveAlive gates the "busy" reps: if the slave never came up, dispatching
  * SLAVE_BUSY to it would spin forever waiting for a flag nobody clears. The
- * "idle" reps never touch the slave and are unaffected either way. */
+ * "idle" reps never touch the slave and are unaffected either way.
+ *
+ * RAM/BUSY and RAM/IDLE are the control: MD work RAM is not on the
+ * cartridge bus, so if DMA succeeds from there while both ROM windows fail,
+ * the 32X adapter is not serving VDP DMA cycles from the cartridge windows.
+ * If it also fails, the DMA setup itself is still wrong and the ROM window
+ * is exonerated. */
 static void romtest_run_all(int slaveAlive)
 {
 	romtest_run_one(MD_CMD_DMA_FIXED,  MD_CMD_CPU_FIXED,  slaveAlive, &romtestRows[0]);
 	romtest_run_one(MD_CMD_DMA_FIXED,  MD_CMD_CPU_FIXED,  0, &romtestRows[1]);
 	romtest_run_one(MD_CMD_DMA_BANKED, MD_CMD_CPU_BANKED, slaveAlive, &romtestRows[2]);
 	romtest_run_one(MD_CMD_DMA_BANKED, MD_CMD_CPU_BANKED, 0, &romtestRows[3]);
+	romtest_run_one(MD_CMD_DMA_RAM,    MD_CMD_CPU_RAM,    slaveAlive, &romtestRows[4]);
+	romtest_run_one(MD_CMD_DMA_RAM,    MD_CMD_CPU_RAM,    0, &romtestRows[5]);
 	romtestHasResult = 1;
 }
 
@@ -552,16 +562,16 @@ static void romtest_format_row(char *buf, const char *label, const RomTestRow *r
 }
 
 /* Shows the first mismatch found, in FIX-BUSY, FIX-IDLE, BANK-BUSY,
- * BANK-IDLE scan order, DMA before CPU within each. Which row it belongs to
- * is already visible from the match counts above it. Expected is always
- * 0xA5A50000 | index, so it is shown from the index rather than sent back
- * from the 68000 separately. */
+ * BANK-IDLE, RAM-BUSY, RAM-IDLE scan order, DMA before CPU within each.
+ * Which row it belongs to is already visible from the match counts above
+ * it. Expected is always 0xA5A50000 | index, so it is shown from the index
+ * rather than sent back from the 68000 separately. */
 static void romtest_format_miss(char *buf)
 {
-	static const char *labels[4] = {"FIX BUSY", "FIX IDLE", "BNK BUSY", "BNK IDLE"};
+	static const char *labels[6] = {"FIX BUSY", "FIX IDLE", "BNK BUSY", "BNK IDLE", "RAM BUSY", "RAM IDLE"};
 	int i, n;
 
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < 6; i++) {
 		const RomTestRow *row = &romtestRows[i];
 		uint16_t idx = 0xFFFF;
 		uint32_t val = 0;
@@ -610,6 +620,8 @@ static void romtest_display(const char *title)
 		clear_text_row(3);
 		clear_text_row(4);
 		clear_text_row(5);
+		clear_text_row(6);
+		clear_text_row(7);
 		return;
 	}
 
@@ -621,8 +633,12 @@ static void romtest_display(const char *title)
 	HwMdPuts(buf, 0x2000, 1, 3);
 	romtest_format_row(buf, "BNK IDLE", &romtestRows[3]);
 	HwMdPuts(buf, 0x2000, 1, 4);
-	romtest_format_miss(buf);
+	romtest_format_row(buf, "RAM BUSY", &romtestRows[4]);
 	HwMdPuts(buf, 0x2000, 1, 5);
+	romtest_format_row(buf, "RAM IDLE", &romtestRows[5]);
+	HwMdPuts(buf, 0x2000, 1, 6);
+	romtest_format_miss(buf);
+	HwMdPuts(buf, 0x2000, 1, 7);
 }
 
 int m_main(void)
@@ -766,7 +782,7 @@ int m_main(void)
 	{
 		int r;
 		romtest_run_all(slaveAlive);
-		for (r = 0; r <= 5; r++) clear_text_row(r);
+		for (r = 0; r <= 7; r++) clear_text_row(r);
 		romtest_display("ROMDMA TEST  press any key");
 		/* The result reporting hands values back through COMM8, which is
 		 * also where the joypad arrives, so the first read after a battery
@@ -778,7 +794,7 @@ int m_main(void)
 		do {
 			joypad_update();
 		} while (!(joypad & (uint16_t)~joypadPrev));
-		for (r = 1; r <= 5; r++) clear_text_row(r);
+		for (r = 1; r <= 7; r++) clear_text_row(r);
 		HwMdPuts(row0Text, 0x2000, 1, 0);
 	}
 
@@ -805,10 +821,10 @@ int m_main(void)
 			       : (romLoadMode == 0 ? 0
 			          : (romLoadMode == 1 ? ROMLOAD_SMALL_WORDS : ROMLOAD_LARGE_WORDS)));
 			if (uiMode) {
-				for (r = 0; r <= 5; r++) clear_text_row(r);
+				for (r = 0; r <= 7; r++) clear_text_row(r);
 				romtest_display("ROMDMA TEST  A=RUN  Y=BACK");
 			} else {
-				for (r = 1; r <= 5; r++) clear_text_row(r);
+				for (r = 1; r <= 7; r++) clear_text_row(r);
 				HwMdPuts(row0Text, 0x2000, 1, 0);
 			}
 		}
