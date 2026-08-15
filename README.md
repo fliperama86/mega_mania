@@ -22,6 +22,8 @@ architecture that follows from it.
       md_src/       68000: the VDP, sprite emission, tile upload, the assets
       sh_src/       SH-2: pad, physics, collision, camera, animation
     blitbench/      32X benchmark, measures the hardware. Not part of the game.
+    cdbench/        Mega CD Mode 1 bring-up, reported step by step on screen
+      cd/           the sub-CPU program, built separately and incbin'd
     assets/         converted output, gitignored, regenerate as needed
     docs/           findings
 
@@ -51,10 +53,18 @@ The 32X benchmark is separate:
     cd blitbench && make
     ares --system "Mega 32X" blitbench/blitbench.32x
 
+So is the Mega CD bring-up. It is launched as a 32X cart, not as a Mega CD 32X
+one: ares attaches the CD hardware itself, because the ROM header declares `C`
+in its device field, and `--system "Mega CD 32X"` would treat the ROM as a disc
+image and boot the BIOS instead.
+
+    cd cdbench && make
+    ares --system "Mega 32X" --no-file-prompt cdbench/cdbench.32x
+
 ## Notes
 
-Both Makefiles carry an explicit dependency from the `.incbin` object to the
-data it includes. Without it the ROM silently ships stale data, which is a trap
+Every Makefile here carries an explicit dependency from each `.incbin` object to
+the data it includes. Without it the ROM silently ships stale data, which is a trap
 marsdev's own examples fall into and which cost hours here.
 
 Sonic's frames are uploaded one DMA per frame into a small VRAM window, so only

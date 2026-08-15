@@ -387,6 +387,20 @@ FRT block before anything else; `mars_start.s` skips it and its interrupt
 handlers omit the bulletin's workaround. Only bites once more than one SH-2
 interrupt source is live, and the two omissions compound.
 
+**GCC's byte copy can land one byte off, and the 68000 manual does not settle
+it.** A plain `while (n--) *dst++ = *src++;` over `uint8_t*` compiles at -O2 to
+`move.b (%a0)+,(%a0,%d1.l)`: the same address register post-incremented as the
+source and used as the index of the destination. GCC computes `d1` expecting the
+destination to see the register *before* the increment. ares fetches the source
+first, so the register is already incremented when the destination address is
+worked out, and the whole copy lands one byte high. In `cdbench` this presented
+as a sub-CPU program that copied into PRG RAM with byte zero never written, and
+it survived a separate byte-write test that passed, because the test wrote
+through a `volatile` pointer and never got the idiom. Which side real hardware
+takes is unmeasured and is worth five lines on the Neptune, since it needs no CD
+at all. Until then, do not let the compiler generate it: copy word-wise, or
+write through `volatile`. No current ROM in this repo contains the instruction.
+
 **Cache alignment is worth a few percent.** The same 104 sprites measured 16.6 ms
 in one build and 17.2 ms in the next, purely from unrelated edits shifting the
 blit loop inside the 4 KB cache.
@@ -456,15 +470,38 @@ that also emulates Mega CD hardware, so it can carry the test ROM and be the
 device under test at once. Whether it answers at 0x400000 with an adapter in the
 way is unknown and worth a single measurement.
 
+**Mode 1 bring-up runs, in emulation.** `cdbench/` reaches the CD BIOS at
+0x415800, resets the sub-CPU, probes PRG RAM through the adapter, decompresses
+the sub-CPU BIOS, uploads a 224 byte program, starts it, completes the
+INITIALIZING to READY handshake in about 2,900 spins and holds a per frame ping
+for thousands of frames with no failures. So the windows at 0x400000 do decode
+with a 32X in the way, and the comm register protocol works, in ares. On a bare
+32X the same ROM prints NO CD DETECTED and idles.
+
+Two things that cost real time and are worth knowing before touching this again.
+The cart must declare Mega CD support: `mia/medium/mega-32x.cpp` reads the
+device field at ROM offset 0x190 and only attaches the CD hardware if it finds a
+`C` there. And the tower has to be launched as `--system "Mega 32X"` with the
+cart alone; `--system "Mega CD 32X"` treats the first file as a disc image,
+leaves the cartridge slot empty and boots the BIOS CD player instead, which is
+what "confirmed working" above actually meant.
+
+```sh
+ares --system "Mega 32X" --no-file-prompt cdbench/cdbench.32x
+```
+
+The CD BIOS needs a level 2 interrupt at roughly vblank rate to make progress,
+and this ROM cannot give it one the way the reference does, since 68000
+interrupts stay off here. Driving it off the VDP's vblank flag works. Driving it
+on every spin of a wait loop does not: the sub-CPU can re-enter the handler
+faster than it leaves it, and the wait then times out for a reason that has
+nothing to do with the hardware.
+
 Next, in order:
 
 1. **One zone end to end**, to get a real cost per act. First because it is the
    only item on this list that can be measured on the hardware in the room.
-2. **MCD Mode 1 bring-up.** Reset the sub-CPU, upload a program to PRG RAM, send
-   a command, get an ack. The reference is `SegaCDMode1PCM` in
-   `~/Projects/references`, which needs porting from the gendev toolchain to
-   marsdev.
-3. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO. Not
+2. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO. Not
    "measured", the way the rest of this document uses that word, until there is
    a tower to measure.
 
