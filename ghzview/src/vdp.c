@@ -92,6 +92,15 @@ void vdp_vsync() {
 	while(*vdp_ctrl_port & 8) {};
 }
 
+/* Returns at the start of vblank, where vdp_vsync returns at the end of it.
+ * Anything that has to reach VRAM at full speed, DMA above all, belongs after
+ * this: during active display the VDP only accepts about eighteen bytes a
+ * scanline and the transfer stalls the 68000 for the rest of the frame. */
+void vdp_wait_vblank() {
+	while(*vdp_ctrl_port & 8) {};
+	while(!(*vdp_ctrl_port & 8)) {};
+}
+
 // Register stuff
 
 void vdp_set_display(uint8_t enabled) {

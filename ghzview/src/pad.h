@@ -10,6 +10,7 @@
 #define PAD_A      0x40
 #define PAD_START  0x80
 
+void pad_init(void);
 uint16_t pad_read(void);
 
 #endif

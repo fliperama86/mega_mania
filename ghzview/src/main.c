@@ -122,9 +122,11 @@ int main(void)
 {
 	uint16_t tileCount = (uint16_t)(ghz_tiles_end - ghz_tiles) / 8;
 	uint16_t firstCol;
+	uint16_t frame = 0;
 	Player sonic;
 
 	vdp_init();
+	pad_init();
 	enable_ints;
 
 	/* three palettes for the stage, the fourth is Sonic's */
@@ -182,8 +184,18 @@ int main(void)
 		                   sonic.direction, list, 0);
 		list[used - 1].link = 0;
 
-		vdp_vsync();
-		/* the frame's tiles go in during vblank, the sprite table right after */
+		/* A frame counter next to the raw pad bits: on real hardware this is
+		 * what separates a hang from an input that never arrives. */
+		{
+			char buf[16];
+			sprintf(buf, "%04X %02X", frame++, pad);
+			vdp_puts(VDP_PLAN_A, buf, 1, 0);
+		}
+
+		/* vdp_wait_vblank, not vdp_vsync: the latter returns once vblank has
+		 * ended, which would put the tile DMA in active display where the VDP
+		 * accepts a trickle and stalls the 68000 for most of the frame. */
+		vdp_wait_vblank();
 		sonic_upload(&sonic.animator);
 		sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);

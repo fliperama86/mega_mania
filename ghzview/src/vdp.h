@@ -83,6 +83,7 @@ extern uint8_t pal_mode;
 void vdp_init();
 // Wait until next vblank
 void vdp_vsync();
+void vdp_wait_vblank();
 
 // Register stuff
 void vdp_set_display(uint8_t enabled);
