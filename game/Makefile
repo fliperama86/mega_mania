@@ -98,6 +98,29 @@ $(MDTARGET).lst: $(MDTARGET).elf
 $(TARGET).lst: $(TARGET).elf
 	$(SHNM) --plugin=$(SHPLUGIN) -n $< > $@
 
+# Mega CD sub-CPU program: minimal port of cd_src/crt.s from
+# ~/Projects/references/SegaCDMode1PCM (MIT, Mikael Kalms), linked flat at
+# 0x6000 with cd_src/cd-mode1.ld, then flattened to a raw binary that
+# md_src/sub_cd.s pulls into the 68000 ROM with .incbin. Modelled exactly on
+# cdbench/Makefile.
+CDOBJS = cd_src/crt.o
+
+cd_src/cd.bin: cd_src/cd.elf
+	@echo "Stripping ELF header from Sub-CPU program"
+	@$(MDOBJC) -O binary $< $@
+
+cd_src/cd.elf: $(CDOBJS)
+	$(MDLD) -T cd_src/cd-mode1.ld -o $@ $^
+
+cd_src/%.o: cd_src/%.s
+	@echo "MDAS $<"
+	@$(MDCC) -x assembler-with-cpp -Icd_src -m68000 -Wa,--register-prefix-optional -c $< -o $@
+
+# md_src/sub_cd.s pulls cd.bin in with .incbin, so it has to be re-assembled
+# whenever that binary changes. Without this the ROM silently keeps an old
+# copy of the sub-CPU program (see docs/hardware-budget.md, section 6).
+md_src/sub_cd.o: cd_src/cd.bin
+
 # m68k stuff
 
 $(MDTARGET).bin: $(MDTARGET).elf
@@ -152,6 +175,7 @@ sh_src/%.o: sh_src/%.cpp
 clean:
 	rm -f $(MDOBJS) $(SHOBJS)
 	rm -f $(MDTARGET).bin $(MDTARGET).elf $(MDTARGET).lst
+	rm -f $(CDOBJS) cd_src/cd.bin cd_src/cd.elf
 	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
 
 # assets.s pulls the converted stage/character data in with .incbin, so it has

@@ -16,7 +16,12 @@
 		.ascii	"MEGA MANIA                                      "
 		.ascii	"MEGA MANIA                                      "
 		.ascii	"GM MEGAMANIA-00 "
-		.ascii	"J6              "
+	/* Device support field. The C is what makes this a Mega CD program:
+	 * ares reads this field at ROM offset 0x190 (mia/medium/mega-32x.cpp)
+	 * and only then attaches the CD hardware and switches the system to
+	 * Mega CD 32X. Without it the cart boots on a bare 32X and Mode 1 has
+	 * nothing to talk to. */
+		.ascii	"J6C             "
 		.long	0x000000
 		.long	0x3FFFFF
 		.long	0xFF0000

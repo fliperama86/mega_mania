@@ -17,6 +17,12 @@
 #include "sonic.h"
 #include "descriptor.h"
 #include "comm.h"
+#include "audio.h"
+#include "cd.h"
+
+/* Track to loop once the disc is spinning; the disc image built alongside
+ * this ROM by tools/make_disc.py is audio-only and starts at track 1. */
+#define CD_MUSIC_TRACK 1
 
 extern const uint16_t ghz_pal[];
 extern const uint32_t ghz_tiles[];
@@ -159,6 +165,12 @@ int main(void)
 	int16_t worldX = 0, worldY = 0;
 	uint16_t frameIndex = 0;
 	uint8_t facing = 0;
+	int cdPresent, cdState = 0;
+
+	/* First thing in boot, before anything else might rely on the audio
+	 * hardware already being quiet (see docs/hardware-budget.md, section
+	 * 6, "Silence the audio hardware at boot"). */
+	audio_silence();
 
 	vdp_init();
 	pad_init();
@@ -173,6 +185,13 @@ int main(void)
 	vdp_colors(48, sonic_pal, 16);
 	vdp_tiles_load(ghz_tiles, TILE_BASE, tileCount);
 	sonic_gfx_init(TILE_BASE + tileCount);
+
+	/* CD bring-up is entirely 68000-local (only this CPU can reach the CD
+	 * hardware) and every wait inside it is bounded, so it can run here
+	 * without disturbing the SH2 handshake below. On the actual test
+	 * hardware, a bare 32X with no CD unit, this returns promptly. */
+	cdPresent = cd_init();
+	if (cdPresent) cdState = cd_music_play(CD_MUSIC_TRACK) ? 2 : 1;
 
 	/* Player/Camera now live only on the slave SH2, so the descriptor table
 	 * and screenCenterY (SCREEN_HALF_H is only valid after vdp_init()) are
@@ -258,8 +277,11 @@ int main(void)
 		 * scrolls under it, so it goes on whichever cell row the top of the
 		 * screen currently lands on rather than on plane row 0. */
 		{
-			char buf[16];
-			sprintf(buf, "%04X %02X", frame++, pad);
+			char buf[24];
+			/* CD digit: 0 none found, 1 brought up, 2 music playing. The
+			 * music has no other visible sign, so without it a silent
+			 * failure and a working disc look identical. */
+			sprintf(buf, "%04X %02X CD%d", frame++, pad, cdState);
 			vdp_puts(VDP_PLAN_A, buf, 1, (camY >> 3) & (PLAN_HEIGHT - 1));
 		}
 
@@ -267,6 +289,11 @@ int main(void)
 		 * ended, which would put the tile DMA in active display where the VDP
 		 * accepts a trickle and stalls the 68000 for most of the frame. */
 		vdp_wait_vblank();
+		/* The CD BIOS needs a level 2 interrupt at about this rate to keep
+		 * running, and a 32X ROM cannot give it one from an interrupt
+		 * handler. Safe to call with no CD present: it returns immediately
+		 * unless cd_init() brought one up. */
+		cd_vblank();
 		sonic_upload(frameIndex);
 		vdp_sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);

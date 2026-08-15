@@ -17,10 +17,13 @@ architecture that follows from it.
       convert_sonic.py   Sonic's frames -> hardware sprite pieces and tiles
       tile_usage.py analysis: which tiles actually carry a map
       collision_preview.py  draws the collision masks over the converted art
+      make_disc.py  music -> a Mega CD audio disc, cue and bin
+      run.sh        build a ROM and run it in ares, disc included
 
     game/           the game: a 32X ROM with the Mega CD under it
       md_src/       68000: the VDP, sprite emission, tile upload, the assets
       sh_src/       SH-2: pad, physics, collision, camera, animation
+      cd_src/       Mega CD sub-CPU: the program the BIOS dispatches
     blitbench/      32X benchmark, measures the hardware. Not part of the game.
     cdbench/        Mega CD Mode 1 bring-up, reported step by step on screen
       cd/           the sub-CPU program, built separately and incbin'd
@@ -45,6 +48,14 @@ reads the 68000's one copy through the descriptor table; if the generated
 layout changes, that mirror has to be changed to match.
 
 Run it:
+
+    tools/run.sh
+
+That builds first, kills any stale ares (an old instance keeps rendering the ROM
+it was launched with, which reads exactly like a fix that did not work), and
+picks up a music disc from `assets/disc/` if one has been built. It takes
+`cdbench` or `blitbench` as an argument to run those instead, and `ARES` in the
+environment to point at another build. The plain form is:
 
     ares --system "Mega 32X" game/megamania.32x
 
