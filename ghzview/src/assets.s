@@ -24,3 +24,7 @@ ghz_map:
 	.global ghz_bgmap
 ghz_bgmap:
 	.incbin "../assets/ghz/map_bg.bin"
+
+	.global ghz_collide
+ghz_collide:
+	.incbin "../assets/ghz/collide.bin"

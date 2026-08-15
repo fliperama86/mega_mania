@@ -85,7 +85,7 @@ def main():
                 hgt = coll[off + c]
                 if hgt == 0xFF:
                     continue
-                sy = y * 16 + (15 - hgt)
+                sy = y * 16 + hgt      # mask measures down from the block top
                 sx = x * 16 + c
                 if 0 <= sx < img.width and 0 <= sy < img.height:
                     px[sx, sy] = (255, 0, 0)
