@@ -18,7 +18,9 @@ architecture that follows from it.
       tile_usage.py analysis: which tiles actually carry a map
       collision_preview.py  draws the collision masks over the converted art
 
-    ghzview/        Mega Drive ROM: a converted stage with Sonic on it
+    ghzview/        32X ROM: a converted stage with Sonic on it
+      md_src/       68000: the VDP, sprite emission, tile upload, the assets
+      sh_src/       SH-2: pad, physics, collision, camera, animation
     blitbench/      32X benchmark, measures the hardware. Not part of the game.
     assets/         converted output, gitignored, regenerate as needed
     docs/           findings
@@ -31,15 +33,18 @@ Toolchain is marsdev, installed at `~/mars` (`make m68k-toolchain-newlib` and
 Convert a stage and the character, then build the viewer:
 
     python3 tools/convert_stage.py /path/to/Data.rsdk GHZ assets/ghz
-    python3 tools/convert_sonic.py /path/to/Data.rsdk assets/sonic ghzview/src
+    python3 tools/convert_sonic.py /path/to/Data.rsdk assets/sonic ghzview/md_src
     cd ghzview && make
 
-`convert_sonic.py` also writes `ghzview/src/sonic_data.{c,h}`, which are
-generated and should not be hand edited.
+`convert_sonic.py` also writes `ghzview/md_src/sonic_data.{c,h}`, which are
+generated and should not be hand edited. `sh_src/sonic_data.h` is a hand-kept
+mirror of the same struct layout with none of the data in it, since the SH-2
+reads the 68000's one copy through the descriptor table; if the generated
+layout changes, that mirror has to be changed to match.
 
 Run it:
 
-    ares --system "Mega Drive" ghzview/out.bin
+    ares --system "Mega 32X" ghzview/ghzview.32x
 
 The 32X benchmark is separate:
 

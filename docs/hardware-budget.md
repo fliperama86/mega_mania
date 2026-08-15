@@ -127,6 +127,32 @@ run somewhere.
 the master doing all the restores and half the blits and measured 72. Sharing
 the restores took it straight to 104.
 
+### The per frame handoff is five words, not a sprite list
+
+The open question in the split was what has to travel from the SH-2 to the
+68000 every frame, since only the 68000 can reach the VDP. On the MD side of
+the picture the answer is: almost nothing. The piece tables are in ROM and both
+CPUs can read them, so the slave sends only what cannot be derived from ROM,
+which is camera position, the character's position, the animation frame and
+facing, plus a sequence number. That fits in the comm registers with room left,
+and the framebuffer never enters the path at all.
+
+Two rules fell out of building it. Every field owns exactly one register: the
+bug blitbench hit was reporting a result through the register its joypad
+arrives in. And sequence number 0 is reserved, because a comm register reads
+back as zero before either CPU has written it, so a published 0 is
+indistinguishable from a slave that has never run, and the 68000 would take it
+for a consistent frame with everything at the world origin.
+
+The assets are linked once, into the 68000 program. The 68000 publishes the
+cartridge relative offset of a descriptor table at boot and the slave reads the
+same bytes through its own view of the cartridge, so there is one copy of the
+data and one place that converts between the two address spaces.
+
+What this costs has not been measured. It is five register writes against a
+frame, so there is no reason to expect it to show up, but the number is not in
+hand.
+
 ### Pipeline
 
 The slave prepares frame N+1's sprite list and decompressed tiles in SDRAM while
@@ -404,7 +430,10 @@ physics, the RSDKv5 tile collision, a camera ported from Camera.c, and Sonic's
 own sprite on hardware sprites with the collision box coming from the animation
 frame. Now a 32X ROM, with the Mega Drive drawing the foreground and the master
 SH-2 drawing the layer behind it, which is the compositing arrangement this
-document argues for, proven with real art. See `ghzview/`.
+document argues for, proven with real art. The game logic has moved onto the
+slave SH-2: the 68000 keeps the VDP and gives up pad, physics, collision,
+camera and the animator, and the frame reaches it through five comm registers
+rather than a sprite list. See `ghzview/`.
 
 Emulator path for the full tower confirmed working, cart first then disc:
 
@@ -412,18 +441,32 @@ Emulator path for the full tower confirmed working, cart first then disc:
 ares --system "Mega CD 32X" blitbench.32x "Sonic CD (USA).chd"
 ```
 
+**The tower has no hardware test path here, and everything below is written
+knowing that.** The 32X side is a Neptune and the CD side is a MegaSD, which is
+itself a cartridge, so the two cannot be stacked. Every CD finding until that
+changes is an emulator finding and gets labelled as one. Section 7 is the reason
+this matters: both hardware-only traps in this document, DMA out of the ROM
+windows and the 128 KB wrap, were invisible in emulation, and the CD path runs
+through the same adapter that produced them. ares stays the development loop for
+CD work, and the work goes on; what it cannot be is the evidence, so CD results
+do not get to settle architecture on their own.
+
+The one thing that might close the gap is the MegaSD itself: it is a flash cart
+that also emulates Mega CD hardware, so it can carry the test ROM and be the
+device under test at once. Whether it answers at 0x400000 with an adapter in the
+way is unknown and worth a single measurement.
+
 Next, in order:
 
-1. **MCD Mode 1 bring-up.** Reset the sub-CPU, upload a program to PRG RAM, send
+1. **One zone end to end**, to get a real cost per act. First because it is the
+   only item on this list that can be measured on the hardware in the room.
+2. **MCD Mode 1 bring-up.** Reset the sub-CPU, upload a program to PRG RAM, send
    a command, get an ack. The reference is `SegaCDMode1PCM` in
    `~/Projects/references`, which needs porting from the gendev toolchain to
    marsdev.
-2. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO, measured.
-3. **Move the game logic onto the slave SH-2.** The 68000 keeps the VDP, since
-   only it can reach it, so the sprite list has to travel from the SH-2 through
-   the framebuffer or the comm registers every frame. That path is the last
-   unmeasured piece of the CPU split.
-4. **One zone end to end**, to get a real cost per act.
+3. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO. Not
+   "measured", the way the rest of this document uses that word, until there is
+   a tower to measure.
 
 Not yet measured, and probably not worth measuring: the Z80 as a sound driver.
 It is standard MD practice with no surprise in it, and it only matters once the
