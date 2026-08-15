@@ -239,6 +239,20 @@ upstream.
 never clears, so waiting on it hangs the 68000 forever and the screen goes black
 with no text, since the MD stops servicing commands.
 
+**The controller ports need their direction registers set.** Writing 0x40 to
+the data register at 0xA10003 only drives TH if 0xA10009 says TH is an output,
+and it comes up as an input. Without that write the pad read comes back from a
+floating pin: on the Neptune the ROM looked either hung or unresponsive, while
+ares drove TH regardless and behaved perfectly. Set 0xA10009, 0xA1000B and
+0xA1000D to 0x40 before the first read. Suspect this first whenever input works
+in an emulator and not on hardware.
+
+**`vdp_vsync` returns at the end of vblank, not the start.** The marsdev
+skeleton's version waits for the flag to set and then to clear, so anything
+after it runs in active display. A tile DMA placed there gets about eighteen
+bytes a scanline instead of two hundred and stalls the 68000 for most of the
+frame. `vdp_wait_vblank` returns at the start of the interval; put DMA there.
+
 **Per-line HScroll collides with the sprite table.** It needs 224 lines x 4
 bytes, occupying 0xFC00 through 0xFF7F, which runs over the default sprite
 attribute table at 0xFE00. Sprites silently vanish. Moved here to 0xF000
@@ -280,8 +294,14 @@ built-in speakers, which do it with any game under ares.
 ## 8. Status
 
 Done: blit budget, CPU split, line-table scrolling, MD VDP sprites and parallax,
-hardware fill, fill overlap, DMA, layer order. Emulator path for the full tower
-confirmed working, cart first then disc:
+hardware fill, fill overlap, DMA, layer order.
+
+Also done, MD side: a stage converted from the data pack, Player.c's ground and
+air physics, the RSDKv5 tile collision, and Sonic's own sprite on hardware
+sprites with the collision box coming from the animation frame. Running on the
+Neptune at 60 Hz. See `ghzview/`.
+
+Emulator path for the full tower confirmed working, cart first then disc:
 
 ```sh
 ares --system "Mega CD 32X" blitbench.32x "Sonic CD (USA).chd"
@@ -294,7 +314,9 @@ Next, in order:
    `~/Projects/references`, which needs porting from the gendev toolchain to
    marsdev.
 2. **CD to 32X pipeline.** Word RAM staging through the DREQ FIFO, measured.
-3. **Port Player.c physics and the tile collision** from the RSDKv5 decomp.
+3. **Move the game logic onto the slave SH-2** and put a 32X layer behind the
+   MD playfield, which is the first time the two halves run together with real
+   art rather than a benchmark.
 4. **One zone end to end**, to get a real cost per act.
 
 Not yet measured, and probably not worth measuring: the Z80 as a sound driver.
