@@ -9,6 +9,7 @@
 #include "bounds.h"
 #include "assets.h"
 #include "comm.h"
+#include "force_spin.h"
 
 /* Map size (g_map_w/g_map_h, from assets.h) comes from the descriptor the
  * 68000 publishes at boot, not a local #define: update_scroll's map-
@@ -74,6 +75,13 @@ void s_main(void)
 		int16_t worldX, worldY;
 
 		player_update(&sonic, pad);
+
+		/* ForceSpin_Update (ForceSpin.c:12-53): the scene's tube-entry/exit
+		 * markers, re-checked against the player's current position every
+		 * frame same as the BoundsMarker pass just below -- see
+		 * force_spin.c's own comment for why that "every marker every frame"
+		 * shape is safe with only one player. */
+		force_spin_apply(&sonic);
 
 		/* BoundsMarker_Update (BoundsMarker.c:12-20): every marker in the
 		 * scene re-checked against the player's current position, in scene

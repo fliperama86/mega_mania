@@ -45,14 +45,14 @@ extern const uint16_t ghz_bgmap[];
  * same cell format as ghz_map above, sharing its MAP_W/MAP_H (converter-
  * asserted equal). At 262,144 B it cannot fit this program's own 512 KB ROM
  * window the way ghz_map does, so it is linked only into the slave SH2's
- * image (sh_src/map_fgh.s), at cartridge offset 0x80000. That offset falls
+ * image (sh_src/map_fgh.s), at cartridge offset 0xC0000. That offset falls
  * in the 68000's banked window (0x900000-0x9FFFFF), which shows bank 0 --
  * cartridge 0x000000-0x0FFFFF -- at 0xA15104's power-on value, and nothing
  * in this codebase ever writes that register, so the fixed pointer below
  * needs no bank switch to stay valid. This literal, sh_src/mars.ld's maphigh
  * ORIGIN and sh_src/map_fgh.s's AT() are a hand-synced trio: change one,
  * change all three. */
-static const uint16_t *const ghz_map_fgh_md = (const uint16_t *)0x980000;
+static const uint16_t *const ghz_map_fgh_md = (const uint16_t *)0x9C0000;
 
 #define VIEW_BLOCKS_X 32        /* 64 cells */
 #define VIEW_BLOCKS_Y 16        /* 32 cells */

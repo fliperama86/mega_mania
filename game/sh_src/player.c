@@ -25,6 +25,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->e.onGround = 1;
 	p->direction = 0;
 	p->applyJumpCap = 0;
+	p->state = PSTATE_NORMAL;
 	p->camAdjustY = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
@@ -35,7 +36,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 }
 
 /* Player_HandleGroundMovement, minus the states this port does not have yet:
- * no rolling, no super, no inverted gravity. */
+ * no super, no inverted gravity. */
 static void ground_movement(Player *p, uint16_t pad)
 {
 	int32_t slope = ((int32_t)sin256(p->e.angle) << 13) >> 8;
@@ -45,78 +46,97 @@ static void ground_movement(Player *p, uint16_t pad)
 	if (p->controlLock > 0) {
 		p->controlLock--;
 		p->e.groundVel += slope;
-		return;
-	}
-
-	if (left) {
-		if (p->e.groundVel > -PHYS_TOP_SPEED) {
-			if (p->e.groundVel <= 0) {
-				p->e.groundVel -= PHYS_ACCELERATION;
-			} else {
-				if (p->e.groundVel > 0x40000) {
-					p->direction = 0;
-					p->skidding = 24;
-				}
-				if (p->e.groundVel < PHYS_SKID_SPEED)
-					p->e.groundVel = -PHYS_SKID_SPEED;
-				else
-					p->e.groundVel -= PHYS_SKID_SPEED;
-			}
-		}
-		if (p->e.groundVel <= 0 && p->skidding < 1) p->direction = 1;
-	}
-
-	if (right) {
-		if (p->e.groundVel < PHYS_TOP_SPEED) {
-			if (p->e.groundVel >= 0) {
-				p->e.groundVel += PHYS_ACCELERATION;
-			} else {
-				if (p->e.groundVel < -0x40000) {
-					p->direction = 1;
-					p->skidding = 24;
-				}
-				if (p->e.groundVel > -PHYS_SKID_SPEED)
-					p->e.groundVel = PHYS_SKID_SPEED;
-				else
-					p->e.groundVel += PHYS_SKID_SPEED;
-			}
-		}
-		if (p->e.groundVel >= 0 && p->skidding < 1) p->direction = 0;
-	}
-
-	if (left || right) {
-		p->e.groundVel += slope;
-
-		/* slipping back down a steep slope when too slow */
-		if (right && !left) {
-			if (p->e.angle > 0xC0 && p->e.angle < 0xE4
-			    && p->e.groundVel > -0x20000 && p->e.groundVel < 0x28000)
-				p->controlLock = 30;
-		} else if (left) {
-			if (p->e.angle > 0x1C && p->e.angle < 0x40
-			    && p->e.groundVel > -0x28000 && p->e.groundVel < 0x20000)
-				p->controlLock = 30;
-		}
 	} else {
-		if (p->e.groundVel <= 0) {
-			p->e.groundVel += PHYS_DECELERATION;
-			if (p->e.groundVel > 0) p->e.groundVel = 0;
-		} else {
-			p->e.groundVel -= PHYS_DECELERATION;
-			if (p->e.groundVel < 0) p->e.groundVel = 0;
+		if (left) {
+			if (p->e.groundVel > -PHYS_TOP_SPEED) {
+				if (p->e.groundVel <= 0) {
+					p->e.groundVel -= PHYS_ACCELERATION;
+				} else {
+					if (p->e.collisionMode == CMODE_FLOOR && p->e.groundVel > 0x40000) {
+						p->direction = 0;
+						p->skidding = 24;
+					}
+					if (p->e.groundVel < PHYS_SKID_SPEED)
+						p->e.groundVel = -PHYS_SKID_SPEED;
+					else
+						p->e.groundVel -= PHYS_SKID_SPEED;
+				}
+			}
+			if (p->e.groundVel <= 0 && p->skidding < 1) p->direction = 1;
 		}
 
-		if (p->e.groundVel > 0x2000 || p->e.groundVel < -0x2000)
+		if (right) {
+			if (p->e.groundVel < PHYS_TOP_SPEED) {
+				if (p->e.groundVel >= 0) {
+					p->e.groundVel += PHYS_ACCELERATION;
+				} else {
+					if (p->e.collisionMode == CMODE_FLOOR && p->e.groundVel < -0x40000) {
+						p->direction = 1;
+						p->skidding = 24;
+					}
+					if (p->e.groundVel > -PHYS_SKID_SPEED)
+						p->e.groundVel = PHYS_SKID_SPEED;
+					else
+						p->e.groundVel += PHYS_SKID_SPEED;
+				}
+			}
+			if (p->e.groundVel >= 0 && p->skidding < 1) p->direction = 0;
+		}
+
+		if (left || right) {
 			p->e.groundVel += slope;
 
-		if (p->e.angle > 0xC0 && p->e.angle < 0xE4) {
-			if (p->e.groundVel < 0x10000 && p->e.groundVel > -0x10000)
-				p->controlLock = 30;
+			/* slipping back down a steep slope when too slow. Player.c:
+			 * 3152-3163 nests this in "if (right) { if (!left) {...} } else
+			 * if (left) {...}", so holding both keys runs neither branch --
+			 * "else if (left)" is only reachable when right is false. */
+			if (right && !left) {
+				if (p->e.angle > 0xC0 && p->e.angle < 0xE4
+				    && p->e.groundVel > -0x20000 && p->e.groundVel < 0x28000)
+					p->controlLock = 30;
+			} else if (left && !right) {
+				if (p->e.angle > 0x1C && p->e.angle < 0x40
+				    && p->e.groundVel > -0x28000 && p->e.groundVel < 0x20000)
+					p->controlLock = 30;
+			}
+		} else {
+			if (p->e.groundVel <= 0) {
+				p->e.groundVel += PHYS_DECELERATION;
+				if (p->e.groundVel > 0) p->e.groundVel = 0;
+			} else {
+				p->e.groundVel -= PHYS_DECELERATION;
+				if (p->e.groundVel < 0) p->e.groundVel = 0;
+			}
+
+			if (p->e.groundVel > 0x2000 || p->e.groundVel < -0x2000)
+				p->e.groundVel += slope;
+
+			if (p->e.angle > 0xC0 && p->e.angle < 0xE4) {
+				if (p->e.groundVel < 0x10000 && p->e.groundVel > -0x10000)
+					p->controlLock = 30;
+			}
+			if (p->e.angle > 0x1C && p->e.angle < 0x40) {
+				if (p->e.groundVel < 0x10000 && p->e.groundVel > -0x10000)
+					p->controlLock = 30;
+			}
 		}
-		if (p->e.angle > 0x1C && p->e.angle < 0x40) {
-			if (p->e.groundVel < 0x10000 && p->e.groundVel > -0x10000)
-				p->controlLock = 30;
-		}
+	}
+
+	/* Player_HandleGroundMovement's tail (Player.c:3197-3205): runs every
+	 * call, including controlLock frames -- unlike every branch above, it
+	 * sits outside the controlLock gate. invertGravity is always false in
+	 * this port (no inverted-gravity zones ported) and collisionMode is
+	 * always <= CMODE_RWALL (there is no fifth mode), so the original's
+	 * "!invertGravity && collisionMode != CMODE_FLOOR && collisionMode <=
+	 * CMODE_RWALL" reduces to just "not on the floor". */
+	if (p->e.collisionMode != CMODE_FLOOR
+	    && p->e.angle >= 0x40 && p->e.angle <= 0xC0
+	    && abs32(p->e.groundVel) < 0x20000) {
+		p->e.velX = (p->e.groundVel * cos256(p->e.angle)) >> 8;
+		p->e.velY = (p->e.groundVel * sin256(p->e.angle)) >> 8;
+		p->e.onGround = 0;
+		p->e.angle = 0;
+		p->e.collisionMode = CMODE_FLOOR;
 	}
 }
 
@@ -200,7 +220,8 @@ static void ground_animation(Player *p)
 	}
 }
 
-/* Player_Action_Jump */
+/* Player_Action_Jump (Player.c:3295-3329). jumpAbilityState and the PlaySfx
+ * call are not ported: no ability system, no audio hooks at this layer. */
 static void action_jump(Player *p)
 {
 	int32_t force = PHYS_GRAVITY + PHYS_JUMP;
@@ -208,7 +229,12 @@ static void action_jump(Player *p)
 
 	p->controlLock = 0;
 	p->e.onGround = 0;
-	if (p->e.collisionMode == CMODE_FLOOR) p->e.y += PHYS_JUMP_OFFSET;
+	/* Player.c:3300 -- the state half of this guard was dropped as
+	 * unreachable (no Roll state existed yet); restored now that
+	 * PSTATE_ROLL does, so jumping out of a roll does not re-apply the
+	 * y-adjustment Player_Action_Roll already applied on entry. */
+	if (p->e.collisionMode == CMODE_FLOOR && p->state != PSTATE_ROLL)
+		p->e.y += PHYS_JUMP_OFFSET;
 
 	p->e.velX = (p->e.groundVel * cos256(p->e.angle)
 	             + force * sin256(p->e.angle)) >> 8;
@@ -216,17 +242,120 @@ static void action_jump(Player *p)
 	             - force * cos256(p->e.angle)) >> 8;
 
 	sonic_set_anim(&p->animator, ANI_JUMP, 0, 0);
+	/* Player.c:3316-3319. The Tails-only fixed-120 branch is not ported
+	 * (Sonic only, see player.h). */
 	speed = ((abs32(p->e.groundVel) * 0xF0) / PHYS_TOP_SPEED) + 0x30;
-	p->animator.speed = speed > 0xF0 ? 0xF0 : (int16_t)speed;
+	p->animator.speed = (speed > 0xF0) ? (int16_t)0xF0 : (int16_t)speed;
 
 	p->e.angle = 0;
 	p->e.collisionMode = CMODE_FLOOR;
 	p->skidding = 0;
 	p->applyJumpCap = 1;
+	p->state = PSTATE_NORMAL;   /* entity->state = Player_State_Air; */
 }
 
-/* Player_HandleAirFriction, then the animation switch from Player_State_Air */
-static void air_state(Player *p, uint16_t pad)
+/* Player_Action_Roll (Player.c:3330-3340). self->pushing is not ported: this
+ * port has no pushing-against-a-wall feature/field to reset. */
+static void action_roll(Player *p)
+{
+	sonic_set_anim(&p->animator, ANI_JUMP, 0, 0);
+	p->state = PSTATE_ROLL;
+	if (p->e.collisionMode == CMODE_FLOOR) p->e.y += PHYS_JUMP_OFFSET;
+}
+
+/* Player_State_Ground's roll trigger (Player.c:3849-3855). minRollVel's
+ * Player_State_Crouch branch (0x11000) never applies: this port has no
+ * Crouch state (see player.h), so it is always the 0x8800 branch. PlaySfx
+ * not ported (no audio hooks at this layer). */
+static void roll_entry(Player *p, uint16_t pad)
+{
+	if (p->e.groundVel && abs32(p->e.groundVel) >= 0x8800
+	    && !(pad & PAD_LEFT) && !(pad & PAD_RIGHT) && (pad & PAD_DOWN))
+		action_roll(p);
+}
+
+/* Player_HandleRollDeceleration (Player.c:3466-3556). */
+static void roll_deceleration(Player *p, uint16_t pad)
+{
+	int32_t initialVel = p->e.groundVel;
+	int32_t s;
+
+	if ((pad & PAD_RIGHT) && p->e.groundVel < 0) p->e.groundVel += PHYS_ROLL_DECEL;
+	if ((pad & PAD_LEFT) && p->e.groundVel > 0) p->e.groundVel -= PHYS_ROLL_DECEL;
+
+	if (p->e.groundVel) {
+		s = sin256(p->e.angle);
+		if (p->e.groundVel < 0) {
+			p->e.groundVel += PHYS_ROLL_FRICTION;
+			p->e.groundVel += ((s >= 0) ? 0x1400 : 0x5000) * s >> 8;
+			if (p->e.groundVel < -PHYS_ROLL_SPEED_CAP) p->e.groundVel = -PHYS_ROLL_SPEED_CAP;
+		} else {
+			p->e.groundVel -= PHYS_ROLL_FRICTION;
+			p->e.groundVel += ((s <= 0) ? 0x1400 : 0x5000) * s >> 8;
+			if (p->e.groundVel > PHYS_ROLL_SPEED_CAP) p->e.groundVel = PHYS_ROLL_SPEED_CAP;
+		}
+	} else {
+		p->e.groundVel += 0x5000 * sin256(p->e.angle) >> 8;
+	}
+
+	/* Player_HandleRollDeceleration's CMODE_LWALL/CMODE_RWALL cases
+	 * (Player.c:3523-3533) and its CMODE_ROOF case (3536-3554, whose own
+	 * invertGravity branch never taken in this port -- see ground_movement's
+	 * comment on the same reduction) are all three identical once
+	 * invertGravity is always false, so a single "not on the floor" test
+	 * covers them. */
+	if (p->e.collisionMode != CMODE_FLOOR) {
+		if (p->e.angle >= 0x40 && p->e.angle <= 0xC0
+		    && abs32(p->e.groundVel) < 0x20000) {
+			p->e.velX = (p->e.groundVel * cos256(p->e.angle)) >> 8;
+			p->e.velY = (p->e.groundVel * sin256(p->e.angle)) >> 8;
+			p->e.onGround = 0;
+			p->e.angle = 0;
+			p->e.collisionMode = CMODE_FLOOR;
+		}
+	} else if (p->state == PSTATE_TUBE_ROLL) {
+		if (abs32(p->e.groundVel) < 0x10000)
+			/* self->direction & FLIP_Y (Player.c:3509) is always 0 here: the
+			 * only site that ever sets that bit on the PLAYER's direction is
+			 * the death-state branch at Player.c:190-193, and this port has
+			 * no death state (see this file's top-of-file comment), so the
+			 * relaunch is always the else arm below, +PHYS_TUBE_LAUNCH_SPEED. */
+			p->e.groundVel = PHYS_TUBE_LAUNCH_SPEED;
+	} else if ((p->e.groundVel >= 0 && initialVel <= 0)
+	           || (p->e.groundVel <= 0 && initialVel >= 0)) {
+		p->e.groundVel = 0;
+		p->state = PSTATE_NORMAL;   /* self->state = Player_State_Ground; */
+	}
+}
+
+/* Player_HandleAirMovement (Player.c:3255-3272), minus Player_Gravity_True
+ * (s_main.c's airborne parameter to camera_update already covers it) and
+ * Player_HandleAirRotation/pushing=0 (no sprite-rotation output and no
+ * pushing feature in this port -- see state_roll's comment for why nothing
+ * here reads a "rotation" field). Used by air_state's full per-frame body
+ * below and by the Roll/TubeRoll states' same-frame fall-off-the-ground
+ * transition (Player.c:3941-3943, 3980-3982), which call only this much of
+ * what air_state does -- not air_state's own friction/animation-switch
+ * halves, matching the original calling only Player_HandleAirMovement
+ * there, not the full Player_State_Air. */
+static void air_gravity(Player *p, uint16_t pad)
+{
+	p->e.velY += PHYS_GRAVITY;
+
+	/* Releasing jump early caps the rise, which is the short hop */
+	if (p->e.velY < PHYS_JUMP_CAP && p->animator.anim == ANI_JUMP
+	    && !(pad & (PAD_A | PAD_B | PAD_C)) && p->applyJumpCap) {
+		p->e.velX -= p->e.velX >> 5;
+		p->e.velY = PHYS_JUMP_CAP;
+	}
+
+	p->e.collisionMode = CMODE_FLOOR;
+}
+
+/* Player_HandleAirFriction (Player.c:3273-3293). Takes its own pad so
+ * state_tube_air below can pass its controlLock-masked copy while air_state
+ * passes the real one, the same split air_gravity already has. */
+static void air_friction(Player *p, uint16_t pad)
 {
 	if (p->e.velY > -0x40000 && p->e.velY < 0)
 		p->e.velX -= p->e.velX >> 5;
@@ -239,17 +368,16 @@ static void air_state(Player *p, uint16_t pad)
 		if (p->e.velX < PHYS_TOP_SPEED) p->e.velX += PHYS_AIR_ACCEL;
 		p->direction = 0;
 	}
+}
 
-	p->e.velY += PHYS_GRAVITY;
-
-	/* Releasing jump early caps the rise, which is the short hop */
-	if (p->e.velY < PHYS_JUMP_CAP && p->animator.anim == ANI_JUMP
-	    && !(pad & (PAD_A | PAD_B | PAD_C)) && p->applyJumpCap) {
-		p->e.velX -= p->e.velX >> 5;
-		p->e.velY = PHYS_JUMP_CAP;
-	}
-
-	p->e.collisionMode = CMODE_FLOOR;
+/* Player_HandleAirFriction, then air_gravity, then the animation switch from
+ * Player_State_Air (Player.c:3871-3930) -- Player_State_Air itself calls
+ * HandleAirFriction unconditionally, then HandleAirMovement only while still
+ * airborne, in that same order. */
+static void air_state(Player *p, uint16_t pad)
+{
+	air_friction(p, pad);
+	air_gravity(p, pad);
 
 	switch (p->animator.anim) {
 	case ANI_IDLE:
@@ -274,6 +402,73 @@ static void air_state(Player *p, uint16_t pad)
 	}
 }
 
+/* Player_State_Roll (Player.c:3932-3958). Player_HandleGroundRotation is not
+ * ported: this build's comm protocol (comm.h) has no sprite-rotation field,
+ * only an animation-frame index and a direction bit, so nothing downstream
+ * of this port could ever read the value RSDK's version computes -- same
+ * reasoning as air_gravity dropping Player_HandleAirRotation above. */
+static void state_roll(Player *p, uint16_t pad, uint16_t jumpPress)
+{
+	roll_deceleration(p, pad);
+	p->applyJumpCap = 0;
+
+	if (!p->e.onGround) {
+		p->state = PSTATE_NORMAL;   /* self->state = Player_State_Air; */
+		air_gravity(p, pad);
+	} else {
+		/* Player.c:3945-3951. Tails-only fixed-120 branch not ported. */
+		int32_t speed = ((abs32(p->e.groundVel) * 0xF0) / PHYS_TOP_SPEED) + 0x30;
+		p->animator.speed = (speed > 0xF0) ? (int16_t)0xF0 : (int16_t)speed;
+		if (jumpPress) action_jump(p);
+	}
+}
+
+/* Player_State_TubeRoll (Player.c:3959-3994). No jumpPress check anywhere in
+ * this function: the original never reads self->jumpPress in this state
+ * either -- tube rolling cannot jump. Player_HandleGroundRotation not ported,
+ * see state_roll's comment. */
+static void state_tube_roll(Player *p, uint16_t pad)
+{
+	uint16_t maskedPad = pad;
+
+	if (p->controlLock > 0) {
+		maskedPad = (uint16_t)(pad & ~(PAD_LEFT | PAD_RIGHT));
+		p->controlLock--;
+	}
+
+	roll_deceleration(p, maskedPad);
+	p->applyJumpCap = 0;
+
+	if (!p->e.onGround) {
+		p->state = PSTATE_TUBE_AIR;   /* self->state = Player_State_TubeAirRoll; */
+		air_gravity(p, pad);
+	} else {
+		/* Player.c:3984-3990. Tails-only fixed-120 branch not ported. */
+		int32_t speed = ((abs32(p->e.groundVel) * 0xF0) / PHYS_TOP_SPEED) + 0x30;
+		p->animator.speed = (speed > 0xF0) ? (int16_t)0xF0 : (int16_t)speed;
+	}
+}
+
+/* Player_State_TubeAirRoll (Player.c:3995-4025). Player_HandleGroundRotation
+ * not ported, see state_roll's comment. */
+static void state_tube_air(Player *p, uint16_t pad)
+{
+	uint16_t maskedPad = pad;
+
+	if (p->controlLock > 0) {
+		maskedPad = (uint16_t)(pad & ~(PAD_LEFT | PAD_RIGHT));
+		p->controlLock--;
+	}
+
+	air_friction(p, maskedPad);
+	p->applyJumpCap = 0;
+
+	if (!p->e.onGround)
+		air_gravity(p, pad);
+	else
+		p->state = PSTATE_TUBE_ROLL;   /* self->state = Player_State_TubeRoll; */
+}
+
 void player_update(Player *p, uint16_t pad)
 {
 	static uint16_t prevPad;
@@ -282,12 +477,20 @@ void player_update(Player *p, uint16_t pad)
 
 	prevPad = pad;
 
-	if (p->e.onGround) {
-		ground_movement(p, pad);
-		ground_animation(p);
-		if (jumpPress) action_jump(p);
-	} else {
-		air_state(p, pad);
+	switch (p->state) {
+	case PSTATE_ROLL:      state_roll(p, pad, jumpPress); break;
+	case PSTATE_TUBE_ROLL: state_tube_roll(p, pad); break;
+	case PSTATE_TUBE_AIR:  state_tube_air(p, pad); break;
+	default:                /* PSTATE_NORMAL: Player_State_Ground / Air */
+		if (p->e.onGround) {
+			ground_movement(p, pad);
+			ground_animation(p);
+			if (jumpPress) action_jump(p);
+			else roll_entry(p, pad);
+		} else {
+			air_state(p, pad);
+		}
+		break;
 	}
 
 	/* RSDK takes the collision box from the animation frame every update, so

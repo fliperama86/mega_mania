@@ -94,6 +94,12 @@ MARS_HEADER:
 ! Standard MD startup code at 0x3F0
 M68K_CODE:
 		.incbin "md_start.bin"
+! End of the 68000-visible program. The 68000's fixed cartridge window shows
+! only the first 512 KB of ROM, so mars.ld ASSERTs this label stays below
+! cartridge offset 0x80000; rom's own LENGTH no longer enforces that since
+! it grew past 512 KB to make room ahead of maphigh.
+		.global M68K_CODE_END
+M68K_CODE_END:
 
 
 	.data

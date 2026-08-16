@@ -71,6 +71,13 @@ extern uint16_t g_map_w, g_map_h;
 #define WALL_ANGLE_TOLERANCE  0x20
 #define ROOF_ANGLE_TOLERANCE  0x20
 
+/* COLLISION_OFFSET, RETRO_REV0U=1 RETRO_USE_ORIGINAL_CODE=0 (Collision.cpp:
+ * 9-18): the TO_FIXED(8) branch is REV0U-original-code only, this build's
+ * config takes TO_FIXED(4). Gated per call by useCollisionOffset
+ * (Collision.cpp:949-961), computed once in path_grip and threaded into
+ * set_sensors below -- see its own comment for why path_air never needs it. */
+#define COLLISION_OFFSET TO_FIXED(4)
+
 /* Set on entry by path_grip/path_air exactly as ProcessObjectMovement sets
  * RSDK::collisionTolerance; the four position finders below read it. */
 static int32_t collisionTolerance;
@@ -522,13 +529,18 @@ static void rwall_collision(Sensor *s)
 
 /* ---- SetPathGripSensors -------------------------------------------------- */
 
-static void set_sensors(PathEntity *e, Sensor *s)
+/* useOffset: SetPathGripSensors's useCollisionOffset (Collision.cpp:949-961),
+ * computed once by path_grip's caller and passed down rather than read from
+ * a file-scope flag -- see path_grip's own comment for the exact formula. */
+static void set_sensors(PathEntity *e, Sensor *s, int32_t useOffset)
 {
+	int32_t offset = useOffset ? COLLISION_OFFSET : 0;
+
 	switch (e->collisionMode) {
 	default:
 	case CMODE_FLOOR:
 		s[0].y = s[1].y = s[2].y = s[4].y + TO_FIXED(e->outer.bottom);
-		s[3].y = s[4].y;
+		s[3].y = s[4].y + offset;
 		s[0].x = s[4].x + TO_FIXED(e->inner.left) - TO_FIXED(1);
 		s[1].x = s[4].x;
 		s[2].x = s[4].x + TO_FIXED(e->inner.right);
@@ -551,7 +563,7 @@ static void set_sensors(PathEntity *e, Sensor *s)
 	case CMODE_ROOF:
 		s[0].y = s[1].y = s[2].y =
 			s[4].y - TO_FIXED(e->outer.bottom) - TO_FIXED(1);
-		s[3].y = s[4].y;
+		s[3].y = s[4].y - offset;
 		s[0].x = s[4].x + TO_FIXED(e->inner.left) - TO_FIXED(1);
 		s[1].x = s[4].x;
 		s[2].x = s[4].x + TO_FIXED(e->inner.right);
@@ -592,6 +604,144 @@ static void sync_velocity(PathEntity *e)
 	}
 }
 
+/* ---- ProcessPathGrip's post-loop application ------------------------------
+ *
+ * Collision.cpp:1901-2086: runs exactly once, after the scan loop below
+ * exits, over whichever sensors last ran -- a second, separate switch on
+ * collisionMode from the one the loop itself uses. newCollisionMode/newAngle
+ * (RETRO_REV0U's "tileCollisions == TILECOLLISION_DOWN ? CMODE_FLOOR :
+ * CMODE_ROOF" and that shifted to a starting angle) collapse to plain
+ * CMODE_FLOOR/0 here: this port never runs upside-down gravity, same as
+ * find_floor_layer's group comment already notes for TILECOLLISION_UP.
+ *
+ * Each case's "leaving the ground" branch (the else of "sensors[0..2] didn't
+ * collide") independently recomputes velocity from the *pre-transition*
+ * angle/groundVel and re-derives groundVel from it -- sync_velocity() below
+ * then harmlessly repeats that same groundVel=velX assignment once more
+ * (its onGround-false half), and for the branches that stay grounded,
+ * sync_velocity's onGround-true half is what actually derives velX/velY from
+ * the angle this function just settled on (LWALL/RWALL's grounded branch
+ * touches only e->angle, same as the original touching only
+ * collisionEntity->angle -- velocity is entirely sync_velocity's job there). */
+static void apply_grip_result(PathEntity *e, Sensor *s)
+{
+	switch (e->collisionMode) {
+	default:
+	case CMODE_FLOOR:
+		if (s[0].collided || s[1].collided || s[2].collided) {
+			e->angle = s[0].angle;
+			if (!s[3].collided) {
+				e->x = s[4].x;
+			} else {
+				if (e->groundVel > 0) e->x = s[3].x - TO_FIXED(e->outer.right);
+				if (e->groundVel < 0) e->x = s[3].x - TO_FIXED(e->outer.left) + TO_FIXED(1);
+				e->groundVel = 0;
+				e->velX = 0;
+			}
+			e->y = s[4].y;
+		} else {
+			e->onGround = 0;
+			e->collisionMode = CMODE_FLOOR;
+			e->velX = (cos256(e->angle) * e->groundVel) >> 8;
+			e->velY = (sin256(e->angle) * e->groundVel) >> 8;
+			if (e->velY < -TO_FIXED(16)) e->velY = -TO_FIXED(16);
+			if (e->velY > TO_FIXED(16)) e->velY = TO_FIXED(16);
+			e->groundVel = e->velX;
+			e->angle = 0;
+			if (!s[3].collided) {
+				e->x += e->velX;
+			} else {
+				if (e->groundVel > 0) e->x = s[3].x - TO_FIXED(e->outer.right);
+				if (e->groundVel < 0) e->x = s[3].x - TO_FIXED(e->outer.left) + TO_FIXED(1);
+				e->groundVel = 0;
+				e->velX = 0;
+			}
+			e->y += e->velY;
+		}
+		break;
+
+	case CMODE_LWALL:
+		if (s[0].collided || s[1].collided || s[2].collided) {
+			e->angle = s[0].angle;
+		} else {
+			e->onGround = 0;
+			e->collisionMode = CMODE_FLOOR;
+			e->velX = (cos256(e->angle) * e->groundVel) >> 8;
+			e->velY = (sin256(e->angle) * e->groundVel) >> 8;
+			if (e->velY < -TO_FIXED(16)) e->velY = -TO_FIXED(16);
+			if (e->velY > TO_FIXED(16)) e->velY = TO_FIXED(16);
+			e->groundVel = e->velX;
+			e->angle = 0;
+		}
+		if (!s[3].collided) {
+			e->x = s[4].x;
+			e->y = s[4].y;
+		} else {
+			if (e->groundVel > 0) e->y = s[3].y + TO_FIXED(e->outer.right) + TO_FIXED(1);
+			if (e->groundVel < 0) e->y = s[3].y - TO_FIXED(e->outer.left);
+			e->groundVel = 0;
+			e->x = s[4].x;
+		}
+		break;
+
+	case CMODE_ROOF:
+		if (s[0].collided || s[1].collided || s[2].collided) {
+			e->angle = s[0].angle;
+			if (!s[3].collided) {
+				e->x = s[4].x;
+			} else {
+				if (e->groundVel > 0) e->x = s[3].x + TO_FIXED(e->outer.right);
+				if (e->groundVel < 0) e->x = s[3].x + TO_FIXED(e->outer.left) - TO_FIXED(1);
+				e->groundVel = 0;
+			}
+		} else {
+			e->onGround = 0;
+			e->collisionMode = CMODE_FLOOR;
+			e->velX = (cos256(e->angle) * e->groundVel) >> 8;
+			e->velY = (sin256(e->angle) * e->groundVel) >> 8;
+			if (e->velY < -TO_FIXED(16)) e->velY = -TO_FIXED(16);
+			if (e->velY > TO_FIXED(16)) e->velY = TO_FIXED(16);
+			e->angle = 0;
+			e->groundVel = e->velX;
+			if (!s[3].collided) {
+				e->x += e->velX;
+			} else {
+				if (e->groundVel > 0) e->x = s[3].x - TO_FIXED(e->outer.right);
+				if (e->groundVel < 0) e->x = s[3].x - TO_FIXED(e->outer.left) + TO_FIXED(1);
+				e->groundVel = 0;
+			}
+		}
+		e->y = s[4].y;
+		break;
+
+	case CMODE_RWALL:
+		if (s[0].collided || s[1].collided || s[2].collided) {
+			e->angle = s[0].angle;
+		} else {
+			e->onGround = 0;
+			e->collisionMode = CMODE_FLOOR;
+			e->velX = (cos256(e->angle) * e->groundVel) >> 8;
+			e->velY = (sin256(e->angle) * e->groundVel) >> 8;
+			if (e->velY < -TO_FIXED(16)) e->velY = -TO_FIXED(16);
+			if (e->velY > TO_FIXED(16)) e->velY = TO_FIXED(16);
+			e->groundVel = e->velX;
+			e->angle = 0;
+		}
+		if (!s[3].collided) {
+			e->x = s[4].x;
+			e->y = s[4].y;
+		} else {
+			if (e->groundVel > 0) e->y = s[3].y - TO_FIXED(e->outer.right);
+			if (e->groundVel < 0) e->y = s[3].y - TO_FIXED(e->outer.left) + TO_FIXED(1);
+			e->groundVel = 0;
+			e->x = s[4].x;
+		}
+		break;
+	}
+
+	sync_velocity(e);
+}
+
 /* ---- ProcessPathGrip ----------------------------------------------------- */
 
 void path_grip(PathEntity *e)
@@ -601,10 +751,21 @@ void path_grip(PathEntity *e)
 	int32_t absSpeed = (e->groundVel < 0) ? -e->groundVel : e->groundVel;
 	int32_t checkDist = absSpeed >> 18;
 	int32_t i, best;
+	int32_t useOffset;
+	uint8_t wallHit;
 
 	collisionTolerance = HIGH_COLLISION_TOLERANCE;
 	if (iabs(e->groundVel) < TO_FIXED(6) && e->angle == 0)
 		collisionTolerance = LOW_COLLISION_TOLERANCE;
+
+	/* useCollisionOffset (Collision.cpp:949-961): tileCollisions is always
+	 * TILECOLLISION_DOWN here, so its ternary is always the angle==0 arm;
+	 * ANDed with the !RETRO_USE_ORIGINAL_CODE chibi-hitbox fix (959-961)
+	 * folded in directly since it is unconditional in this build. Computed
+	 * once from the angle/box this call started with, not re-evaluated per
+	 * sensor probe -- set_sensors is called again below as the loop steps,
+	 * but always with this same useOffset. */
+	useOffset = (e->angle == 0 && e->outer.bottom >= 14);
 
 	absSpeed &= 0x3FFFF;
 
@@ -614,7 +775,7 @@ void path_grip(PathEntity *e)
 		s[i].angle = e->angle;
 		s[i].collided = 0;
 	}
-	set_sensors(e, s);
+	set_sensors(e, s, useOffset);
 
 	while (checkDist > -1) {
 		if (checkDist >= 1) {
@@ -635,29 +796,63 @@ void path_grip(PathEntity *e)
 		s[4].x += xVel;
 		s[4].y += yVel;
 
-		/* Only the floor mode is stepped for now; the other three reuse the
-		 * same shape with their own finders. */
 		s[3].x += xVel;
 		s[3].y += yVel;
-		if (e->collisionMode == CMODE_FLOOR) {
-			if (e->groundVel > 0) find_lwall(&s[3]);
-			if (e->groundVel < 0) find_rwall(&s[3]);
-		} else if (e->collisionMode == CMODE_LWALL) {
-			if (e->groundVel > 0) find_roof(&s[3]);
-			if (e->groundVel < 0) find_floor(&s[3]);
-		} else if (e->collisionMode == CMODE_ROOF) {
-			if (e->groundVel > 0) find_rwall(&s[3]);
-			if (e->groundVel < 0) find_lwall(&s[3]);
-		} else {
-			if (e->groundVel > 0) find_floor(&s[3]);
-			if (e->groundVel < 0) find_roof(&s[3]);
+
+		/* sensor-3 wall probe: the angle-free family (Collision.cpp:1644/
+		 * 1652 FLOOR, 1714/1717 LWALL, 1772/1780 ROOF, 1839/1842 RWALL),
+		 * already ported as path_air's own wall sensors -- a wall-stop probe
+		 * only needs to know something solid is there, not whether it is a
+		 * plausible continuation of the current slope. REV0U nudges
+		 * (1645-1648, 1653-1656 FLOOR; 1773-1776, 1781-1784 ROOF) reposition
+		 * the sensor that would otherwise re-probe past the wall next
+		 * iteration; LWALL/RWALL get no such nudge in the original (their
+		 * case blocks, 1709-1765 and 1834-1889, have no #if RETRO_REV0U at
+		 * all), so none is added here either. */
+		switch (e->collisionMode) {
+		default:
+		case CMODE_FLOOR:
+			if (e->groundVel > 0) {
+				lwall_collision(&s[3]);
+				if (s[3].collided) s[2].x = s[3].x - TO_FIXED(2);
+			}
+			if (e->groundVel < 0) {
+				rwall_collision(&s[3]);
+				if (s[3].collided) s[0].x = s[3].x + TO_FIXED(2);
+			}
+			break;
+		case CMODE_LWALL:
+			if (e->groundVel > 0) roof_collision(&s[3]);
+			if (e->groundVel < 0) floor_collision(&s[3]);
+			break;
+		case CMODE_ROOF:
+			if (e->groundVel > 0) {
+				rwall_collision(&s[3]);
+				if (s[3].collided) s[2].x = s[3].x + TO_FIXED(2);
+			}
+			if (e->groundVel < 0) {
+				lwall_collision(&s[3]);
+				if (s[3].collided) s[0].x = s[3].x - TO_FIXED(2);
+			}
+			break;
+		case CMODE_RWALL:
+			if (e->groundVel > 0) floor_collision(&s[3]);
+			if (e->groundVel < 0) roof_collision(&s[3]);
+			break;
 		}
 
-		if (s[3].collided) {
-			xVel = 0;
-			yVel = 0;
+		/* Per-mode wall-hit zero (Collision.cpp:1659-1662/1787-1790 zero
+		 * xVel for FLOOR/ROOF; 1719-1722/1844-1847 zero yVel for LWALL/
+		 * RWALL): neither groundVel nor the other axis is touched here --
+		 * that only happens once, after the loop, from sensor 3
+		 * (apply_grip_result above). */
+		wallHit = s[3].collided;
+		if (wallHit) {
 			checkDist = -1;
-			e->groundVel = 0;
+			if (e->collisionMode == CMODE_FLOOR || e->collisionMode == CMODE_ROOF)
+				xVel = 0;
+			else
+				yVel = 0;
 		}
 
 		for (i = 0; i < 3; i++) {
@@ -672,82 +867,100 @@ void path_grip(PathEntity *e)
 			}
 		}
 
-		/* pick the sensor that found the highest ground for this mode */
+		/* pick the sensor that found the highest ground for this mode.
+		 * LWALL/RWALL (Collision.cpp:1733/1858) compare the opposite way
+		 * from what their names suggest: LWALL (walking up a left-hand
+		 * wall) prefers the SMALLER x, RWALL the LARGER. FLOOR alone also
+		 * carries an equal-height tie-break toward the flatter angle
+		 * (1677, wraps through the 0/255 seam). */
 		best = -1;
 		for (i = 0; i < 3; i++) {
 			if (!s[i].collided) continue;
 			if (best < 0) { best = i; continue; }
 			switch (e->collisionMode) {
 			default:
-			case CMODE_FLOOR: if (s[i].y < s[best].y) best = i; break;
-			case CMODE_LWALL: if (s[i].x > s[best].x) best = i; break;
+			case CMODE_FLOOR:
+				if (s[i].y < s[best].y) best = i;
+				if (s[i].y == s[best].y && (s[i].angle < 0x08 || s[i].angle > 0xF8))
+					best = i;
+				break;
+			case CMODE_LWALL: if (s[i].x < s[best].x) best = i; break;
 			case CMODE_ROOF:  if (s[i].y > s[best].y) best = i; break;
-			case CMODE_RWALL: if (s[i].x < s[best].x) best = i; break;
+			case CMODE_RWALL: if (s[i].x > s[best].x) best = i; break;
 			}
-		}
-
-		if (best < 0) {              /* nothing underfoot: leave the ground */
-			e->x = s[4].x;
-			e->y = s[4].y;
-			e->velX = (e->groundVel * cos256(e->angle)) >> 8;
-			e->velY = (e->groundVel * sin256(e->angle)) >> 8;
-			e->collisionMode = CMODE_FLOOR;
-			e->angle = 0;
-			e->onGround = 0;
-			sync_velocity(e);
-			return;
 		}
 
 		/* The body position comes back from the sensors, not from its own
 		 * advance. When the leading sensor hit a wall the step was zeroed, so
 		 * the floor sensors still hold the pre-collision position and this is
-		 * what rolls the body back out of the wall. */
-		e->angle = s[best].angle;
+		 * what rolls the body back out of the wall. Collision.cpp keeps the
+		 * mode-transition thresholds inside this same per-mode case, after
+		 * the tileDistance<=-1 check but not gated by it (1701-1705 etc): a
+		 * pass that finds nothing still re-tests whatever angle sensor 0 held
+		 * from the last pass that did, which is harmless since every mode's
+		 * own "nothing collided" epilogue (apply_grip_result) only cares
+		 * about the collided flags, never about collisionMode itself. */
 		switch (e->collisionMode) {
 		default:
 		case CMODE_FLOOR:
-			s[0].y = s[1].y = s[2].y = s[best].y;
-			s[4].x = s[1].x;
-			s[4].y = s[best].y - TO_FIXED(e->outer.bottom);
-			if (s[best].angle < 0xDE && s[best].angle > 0x80)
-				e->collisionMode = CMODE_LWALL;
-			if (s[best].angle > 0x22 && s[best].angle < 0x80)
-				e->collisionMode = CMODE_RWALL;
+			if (best < 0) {
+				checkDist = -1;
+			} else {
+				s[0].y = s[1].y = s[2].y = s[best].y;
+				s[0].angle = s[1].angle = s[2].angle = s[best].angle;
+				s[4].x = s[1].x;
+				s[4].y = s[0].y - TO_FIXED(e->outer.bottom);
+			}
+			if (s[0].angle < 0xDE && s[0].angle > 0x80) e->collisionMode = CMODE_LWALL;
+			if (s[0].angle > 0x22 && s[0].angle < 0x80) e->collisionMode = CMODE_RWALL;
 			break;
 		case CMODE_LWALL:
-			s[0].x = s[1].x = s[2].x = s[best].x;
-			s[4].y = s[1].y;
-			s[4].x = s[best].x - TO_FIXED(e->outer.bottom);
-			if (s[best].angle > 0x5E && s[best].angle < 0xC0)
-				e->collisionMode = CMODE_ROOF;
-			if (s[best].angle < 0x22 || s[best].angle > 0xE2)
-				e->collisionMode = CMODE_FLOOR;
+			if (best < 0) {
+				checkDist = -1;
+			} else {
+				s[0].x = s[1].x = s[2].x = s[best].x;
+				s[0].angle = s[1].angle = s[2].angle = s[best].angle;
+				s[4].y = s[1].y;
+				s[4].x = s[0].x - TO_FIXED(e->outer.bottom);
+			}
+			if (s[0].angle > 0xE2) e->collisionMode = CMODE_FLOOR;
+			if (s[0].angle < 0x9E) e->collisionMode = CMODE_ROOF;
 			break;
 		case CMODE_ROOF:
-			s[0].y = s[1].y = s[2].y = s[best].y;
-			s[4].x = s[1].x;
-			s[4].y = s[best].y + TO_FIXED(e->outer.bottom) + TO_FIXED(1);
-			if (s[best].angle > 0xA2 && s[best].angle < 0xE0)
-				e->collisionMode = CMODE_LWALL;
-			if (s[best].angle > 0x20 && s[best].angle < 0x5E)
-				e->collisionMode = CMODE_RWALL;
+			if (best < 0) {
+				checkDist = -1;
+			} else {
+				s[0].y = s[1].y = s[2].y = s[best].y;
+				s[0].angle = s[1].angle = s[2].angle = s[best].angle;
+				s[4].x = s[1].x;
+				s[4].y = s[0].y + TO_FIXED(e->outer.bottom) + TO_FIXED(1);
+			}
+			if (s[0].angle > 0xA2) e->collisionMode = CMODE_LWALL;
+			if (s[0].angle < 0x5E) e->collisionMode = CMODE_RWALL;
 			break;
 		case CMODE_RWALL:
-			s[0].x = s[1].x = s[2].x = s[best].x;
-			s[4].y = s[1].y;
-			s[4].x = s[best].x + TO_FIXED(e->outer.bottom) + TO_FIXED(1);
-			if (s[best].angle > 0xA2 && s[best].angle < 0xE0)
-				e->collisionMode = CMODE_ROOF;
-			if (s[best].angle < 0x9E && s[best].angle > 0x60)
-				e->collisionMode = CMODE_FLOOR;
+			if (best < 0) {
+				checkDist = -1;
+			} else {
+				s[0].x = s[1].x = s[2].x = s[best].x;
+				s[0].angle = s[1].angle = s[2].angle = s[best].angle;
+				s[4].y = s[1].y;
+				s[4].x = s[0].x + TO_FIXED(e->outer.bottom) + TO_FIXED(1);
+			}
+			if (s[0].angle < 0x1E) e->collisionMode = CMODE_FLOOR;
+			if (s[0].angle > 0x62) e->collisionMode = CMODE_ROOF;
 			break;
 		}
-		set_sensors(e, s);
+
+		if (best >= 0) e->angle = s[0].angle;
+
+		if (!wallHit)
+			set_sensors(e, s, useOffset);
+		else
+			checkDist = -2;
 	}
 
-	e->x = s[4].x;
-	e->y = s[4].y;
-	sync_velocity(e);
+	apply_grip_result(e, s);
 }
 
 /* ---- ProcessAirCollision_Down ---------------------------------------------

@@ -4,9 +4,9 @@
 ! one is not linked into the 68000 program: at 262,144 B it cannot fit that
 ! program's own 512 KB ROM window (see md_src/main.c's ghz_map_fgh_md
 ! comment). It is linked directly into this SH2 program instead, placed by
-! sh_src/mars.ld's maphigh region at cartridge offset 0x80000 -- a fixed
+! sh_src/mars.ld's maphigh region at cartridge offset 0xC0000 -- a fixed
 ! address both CPUs reach with no bank switch. mars.ld's maphigh ORIGIN, this
-! file's AT() load address and ghz_map_fgh_md's 0x980000 are a hand-synced
+! file's AT() load address and ghz_map_fgh_md's 0x9C0000 are a hand-synced
 ! trio; see mars.ld's comment for the other two.
 !
 ! Same cell format as ghz_map (md_src/assets.s): u16 per cell, bits 0-11 a

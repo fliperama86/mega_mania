@@ -26,24 +26,26 @@ SEARCH_DIR(.)
  * +--------------------+ <- 0x0603FC00
  */
 
-/* rom is shrunk to the 68000's own 512 KB cartridge window on purpose: this
- * SH2 program's .text/.data load image and the incbin'd 68000 program both
- * have to fit ahead of maphigh below, and capping LENGTH here turns any
- * overflow into a hard link error instead of it silently landing on top of
- * maphigh's data. See maphigh's own comment for what lives there and why. */
+/* rom is capped just ahead of maphigh below, so the SH2 program's
+ * .text/.data load image overflowing becomes a hard link error instead of
+ * silently landing on top of maphigh's data. The 68000's stricter limit,
+ * its program staying inside the fixed 512 KB cartridge window, is enforced
+ * separately by the M68K_CODE_END ASSERT at the bottom of this script,
+ * since rom's LENGTH now runs past 512 KB. */
 MEMORY {
-	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x00080000
+	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x000C0000
 	ram (wx) : ORIGIN = 0x06000000, LENGTH = 0x0003FC00
 
 	/* FG High's map (assets/ghz/map_fgh.bin, sh_src/map_fgh.s), too big for
 	 * the 68000's own ROM window so it is linked here instead: cartridge
-	 * offset 0x80000, right after rom's 512 KB above. Both CPUs reach this
+	 * offset 0xC0000, right after rom above, ending exactly at the 1 MB
+	 * boundary the 68000's bank 0 covers. Both CPUs reach this
 	 * address with no bank switch -- the SH2s see it directly at this
 	 * ORIGIN, and the 68000 sees the same bytes at the fixed pointer
-	 * 0x980000 (md_src/main.c's ghz_map_fgh_md). This ORIGIN, that pointer
+	 * 0x9C0000 (md_src/main.c's ghz_map_fgh_md). This ORIGIN, that pointer
 	 * and map_fgh.s's AT() load address are a hand-synced trio: change one,
 	 * change all three. */
-	maphigh (r) : ORIGIN = 0x02080000, LENGTH = 0x00040000
+	maphigh (r) : ORIGIN = 0x020C0000, LENGTH = 0x00040000
 }
 
 PROVIDE (__stack = 0x0603FC00);
@@ -93,7 +95,7 @@ SECTIONS {
 	 * image out to gigabytes of padding). KEEP: nothing else references
 	 * this section by name, so without it a garbage-collecting link could
 	 * drop it. */
-	.maphigh 0x02080000 : AT(0x00080000) {
+	.maphigh 0x020C0000 : AT(0x000C0000) {
 		KEEP(*(.maphigh))
 	} > maphigh
 
@@ -122,3 +124,8 @@ SECTIONS {
 		*(.eh_frame)
 	}
 }
+
+/* The 68000-visible program (mars_start.s's M68K_CODE incbin) must stay
+ * inside the 68000's fixed 512 KB cartridge window; rom's LENGTH stopped
+ * guaranteeing that when it grew past 512 KB for maphigh's sake. */
+ASSERT(M68K_CODE_END <= 0x02080000, "68000 program spills past its fixed 512 KB cartridge window")
