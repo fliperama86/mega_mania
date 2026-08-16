@@ -16,10 +16,15 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->e.velX = p->e.velY = 0;
 	p->e.angle = 0;
 	p->e.collisionMode = CMODE_FLOOR;
-	p->e.onGround = 0;
+	/* Already standing, not dropped in. The original hands control over with
+	 * the player grounded: the title card plays over a settled camera, and
+	 * the scene's spawn sits at the surface rather than above it. Starting
+	 * airborne makes the first second a different situation entirely, since
+	 * the camera pins its vertical dead zone open for the whole fall
+	 * (Player_Gravity_True, see camera.c) and only then settles. */
+	p->e.onGround = 1;
 	p->direction = 0;
 	p->applyJumpCap = 0;
-	p->justJumped = 0;
 	p->camAdjustY = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
@@ -218,7 +223,6 @@ static void action_jump(Player *p)
 	p->e.collisionMode = CMODE_FLOOR;
 	p->skidding = 0;
 	p->applyJumpCap = 1;
-	p->justJumped = 1;
 }
 
 /* Player_HandleAirFriction, then the animation switch from Player_State_Air */
@@ -277,7 +281,6 @@ void player_update(Player *p, uint16_t pad)
 	const SonicFrame *f;
 
 	prevPad = pad;
-	p->justJumped = 0;
 
 	if (p->e.onGround) {
 		ground_movement(p, pad);

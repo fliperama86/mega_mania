@@ -30,9 +30,6 @@ typedef struct {
 	Animator animator;
 	uint8_t direction;     /* 0 right, 1 left */
 	uint8_t applyJumpCap;
-	uint8_t justJumped;    /* one-frame pulse from action_jump; s_main.c reads
-	                         * it to open the camera's vertical dead zone, so
-	                         * player.c never has to know Camera exists */
 	int32_t camAdjustY;    /* Player_LateUpdate's self->camera->adjustY
 	                         * (Player.c ~305-310): PHYS_JUMP_OFFSET while
 	                         * grounded and curled up in the jump anim, 0
