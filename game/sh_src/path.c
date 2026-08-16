@@ -13,12 +13,19 @@
  * to a single cell_at() lookup; TILECOLLISION_UP and its ProcessAirCollision_Up
  * counterpart are dropped since nothing here runs upside-down gravity.
  *
- * ghz_map and ghz_collide are linked into the 68000 program only; this SH2
- * side reaches them through runtime pointers assets.c fills in from the
- * descriptor table (see assets.h), not through a linked-in extern array. */
+ * ghz_map and ghz_collide_index/ghz_collide_rows are linked into the 68000
+ * program only; this SH2 side reaches them through runtime pointers assets.c
+ * fills in from the descriptor table (see assets.h), not through a
+ * linked-in extern array. */
 
 extern const uint16_t *g_ghz_map;
-extern const uint8_t *g_ghz_collide;
+/* collide_index[block] is a row number into collide_rows; convert_stage.py
+ * dedups identical 70-byte rows (many blocks -- different tiles, or flip
+ * variants whose masks happen to be symmetric -- share one), so this is one
+ * extra indirection rather than a single b * STRIDE lookup into one flat
+ * per-block array. */
+extern const uint16_t *g_ghz_collide_index;
+extern const uint8_t *g_ghz_collide_rows;
 /* FG Low's size in blocks, published by the 68000 through the descriptor
  * table and filled in by assets_init() (sh_src/assets.c). Not a local
  * #define: see md_src/descriptor.h's GHZ_MAP_W comment for why keeping a
@@ -82,19 +89,21 @@ static void find_floor(Sensor *s)
 	for (i = 0; i < 3; i++, cy += CELL_SIZE) {
 		uint16_t cell = cell_at(posX, cy);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t ty, tileAngle, adiff;
 
 		if (!(cell & SOLID_FLOOR)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_FLOOR + (posX & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_FLOOR + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
 		ty = cy + mask;
 		if (!s->collided || startY >= ty) {
 			if (iabs(colY - ty) > collisionTolerance) continue;
 
-			tileAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 0];
+			tileAngle = row[OFF_ANGLE + 0];
 			adiff = (int32_t)s->angle - tileAngle;
 			/* wraparound terms catch a near-0 tile angle read against a
 			 * sensor angle just past the 0/255 seam, and vice versa */
@@ -122,16 +131,18 @@ static void find_roof(Sensor *s)
 	for (i = 0; i < 3; i++, cy -= CELL_SIZE) {
 		uint16_t cell = cell_at(posX, cy);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t ty, tileAngle;
 
 		if (!(cell & SOLID_SIDES)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_ROOF + (posX & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_ROOF + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
 		ty = cy + mask;
-		tileAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 3];
+		tileAngle = row[OFF_ANGLE + 3];
 		if ((!s->collided || startY <= ty)
 		    && iabs(colY - ty) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= ROOF_ANGLE_TOLERANCE) {
@@ -155,17 +166,19 @@ static void find_lwall(Sensor *s)
 	for (i = 0; i < 3; i++, cx += CELL_SIZE) {
 		uint16_t cell = cell_at(cx, posY);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t tx, tileAngle;
 
 		/* unlike the floor/roof finders, either solid bit blocks a wall */
 		if (!(cell & (SOLID_FLOOR | SOLID_SIDES))) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_LWALL + (posY & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_LWALL + (posY & 0xF)];
 		if (mask == 0xFF) continue;
 
 		tx = cx + mask;
-		tileAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 1];
+		tileAngle = row[OFF_ANGLE + 1];
 		if ((!s->collided || startX >= tx)
 		    && iabs(colX - tx) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= WALL_ANGLE_TOLERANCE) {
@@ -189,16 +202,18 @@ static void find_rwall(Sensor *s)
 	for (i = 0; i < 3; i++, cx -= CELL_SIZE) {
 		uint16_t cell = cell_at(cx, posY);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t tx, tileAngle;
 
 		if (!(cell & (SOLID_FLOOR | SOLID_SIDES))) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_RWALL + (posY & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_RWALL + (posY & 0xF)];
 		if (mask == 0xFF) continue;
 
 		tx = cx + mask;
-		tileAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 2];
+		tileAngle = row[OFF_ANGLE + 2];
 		if ((!s->collided || startX <= tx)
 		    && iabs(colX - tx) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= WALL_ANGLE_TOLERANCE) {
@@ -235,14 +250,16 @@ static void floor_collision(Sensor *s)
 	for (i = 0; i < 2; i++, cy += CELL_SIZE) {
 		uint16_t cell = cell_at(posX, cy);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 
 		if (!(cell & SOLID_FLOOR)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_FLOOR + (posX & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_FLOOR + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
-		collideAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 0];
+		collideAngle = row[OFF_ANGLE + 0];
 		collidePos = cy + mask;
 		break;
 	}
@@ -268,14 +285,16 @@ static void roof_collision(Sensor *s)
 	for (i = 0; i < 2; i++, cy -= CELL_SIZE) {
 		uint16_t cell = cell_at(posX, cy);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 
 		if (!(cell & SOLID_SIDES)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_ROOF + (posX & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_ROOF + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
-		collideAngle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 3];
+		collideAngle = row[OFF_ANGLE + 3];
 		collidePos = cy + mask;
 		break;
 	}
@@ -297,18 +316,20 @@ static void lwall_collision(Sensor *s)
 	for (i = 0; i < 3; i++, cx += CELL_SIZE) {
 		uint16_t cell = cell_at(cx, posY);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t tx;
 
 		if (!(cell & SOLID_SIDES)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_LWALL + (posY & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_LWALL + (posY & 0xF)];
 		if (mask == 0xFF) continue;
 
 		tx = cx + mask;
 		if (posX >= tx && iabs(posX - tx) <= 14) {
 			s->x = TO_FIXED(tx);
-			s->angle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 1];
+			s->angle = row[OFF_ANGLE + 1];
 			s->collided = 1;
 			return;
 		}
@@ -324,18 +345,20 @@ static void rwall_collision(Sensor *s)
 	for (i = 0; i < 3; i++, cx -= CELL_SIZE) {
 		uint16_t cell = cell_at(cx, posY);
 		uint16_t b;
+		const uint8_t *row;
 		uint8_t mask;
 		int32_t tx;
 
 		if (!(cell & SOLID_SIDES)) continue;
 		b = cell & BLOCK_MASK;
-		mask = g_ghz_collide[b * STRIDE + OFF_RWALL + (posY & 0xF)];
+		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
+		mask = row[OFF_RWALL + (posY & 0xF)];
 		if (mask == 0xFF) continue;
 
 		tx = cx + mask;
 		if (posX <= tx && iabs(posX - tx) <= 14) {
 			s->x = TO_FIXED(tx);
-			s->angle = g_ghz_collide[b * STRIDE + OFF_ANGLE + 2];
+			s->angle = row[OFF_ANGLE + 2];
 			s->collided = 1;
 			return;
 		}

@@ -2,12 +2,12 @@
 #define ASSETS_H
 
 /* How the slave SH2 reaches the stage/character assets that are linked into
- * the 68000 program only (ghz_map/ghz_collide via md_src/assets.s's
- * .incbin, sonic_frames/sonic_anims via md_src/sonic_data.c's generated
- * array literals). The assets themselves never move and are never
- * duplicated: this file only resolves runtime pointers to the one copy that
- * lives in the 68000's ROM image, reached through the SH2's own cartridge
- * window. */
+ * the 68000 program only (ghz_map/ghz_collide_index/ghz_collide_rows via
+ * md_src/assets.s's .incbin, sonic_frames/sonic_anims via md_src/
+ * sonic_data.c's generated array literals). The assets themselves never move
+ * and are never duplicated: this file only resolves runtime pointers to the
+ * one copy that lives in the 68000's ROM image, reached through the SH2's
+ * own cartridge window. */
 
 #include <stdint.h>
 
@@ -22,17 +22,20 @@
  * over the spare COMM6 register instead; see assets_init()'s implementation
  * and descriptor.h's comment for the full reasoning. */
 typedef struct {
-	uint32_t ghz_map;       /* address of ghz_map[], as a raw 68000 address */
-	uint32_t ghz_collide;   /* address of ghz_collide[] */
-	uint32_t sonic_frames;  /* address of sonic_frames[] */
-	uint32_t sonic_anims;   /* address of sonic_anims[] */
-	uint32_t ghz_map_w;     /* FG Low width, in 16x16 blocks -- not an
-	                         * address, read directly, no md_addr_to_sh2() */
-	uint32_t ghz_map_h;     /* FG Low height, in 16x16 blocks */
-	uint32_t bg_pal;        /* address of bg_pal[], read by bg.c instead */
-	uint32_t bg_blocks;     /* address of bg_blocks[] */
-	uint32_t bg_map;        /* address of bg_map[] */
-	uint32_t bg_lines;      /* address of bg_lines[] */
+	uint32_t ghz_map;           /* address of ghz_map[], as a raw 68000 address */
+	uint32_t ghz_collide_index; /* address of ghz_collide_index[]: one u16
+	                             * per block, row number into ghz_collide_rows */
+	uint32_t ghz_collide_rows;  /* address of ghz_collide_rows[]: the
+	                             * deduplicated 70-byte collision rows */
+	uint32_t sonic_frames;      /* address of sonic_frames[] */
+	uint32_t sonic_anims;       /* address of sonic_anims[] */
+	uint32_t ghz_map_w;         /* FG Low width, in 16x16 blocks -- not an
+	                             * address, read directly, no md_addr_to_sh2() */
+	uint32_t ghz_map_h;         /* FG Low height, in 16x16 blocks */
+	uint32_t bg_pal;            /* address of bg_pal[], read by bg.c instead */
+	uint32_t bg_blocks;         /* address of bg_blocks[] */
+	uint32_t bg_map;            /* address of bg_map[] */
+	uint32_t bg_lines;          /* address of bg_lines[] */
 } AssetDescriptor;
 
 /* The 68000 and the SH2 see the same cartridge flash through two different
@@ -54,7 +57,7 @@ static inline const void *md_addr_to_sh2(uint32_t md_addr)
  * what used to let the two go out of sync with the converted data (see
  * descriptor.h's GHZ_MAP_W/GHZ_MAP_H comment). path.c declares its own
  * matching extern rather than including this file, same as it does for
- * g_ghz_map/g_ghz_collide below. */
+ * g_ghz_map/g_ghz_collide_index/g_ghz_collide_rows below. */
 extern uint16_t g_map_w, g_map_h;
 
 /* Spin-waits on the descriptor-ready flag (COMM2), reads the descriptor
@@ -62,9 +65,9 @@ extern uint16_t g_map_w, g_map_h;
  * this point, before the post-boot per-frame protocol reinterprets that
  * address as two 16-bit halves), resolves every address field through
  * md_addr_to_sh2(), and stores the results for path.c and sonic_anim.c to
- * use (g_ghz_map, g_ghz_collide, g_sonic_frames, g_sonic_anims, g_map_w,
- * g_map_h). Returns screenCenterY unconverted. Call once, before the game
- * loop starts. */
+ * use (g_ghz_map, g_ghz_collide_index, g_ghz_collide_rows, g_sonic_frames,
+ * g_sonic_anims, g_map_w, g_map_h). Returns screenCenterY unconverted. Call
+ * once, before the game loop starts. */
 uint32_t assets_init(void);
 
 #endif

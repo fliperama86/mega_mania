@@ -11,6 +11,18 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 
 - [x] Stage conversion from the RSDK pack: tiles, blocks, palettes, layout,
       per-block collision (`tools/convert_stage.py`)
+- [x] **Per-cell flips, correctly.** The scene mirrors 14% of its nonempty
+      cells (every loop and S-curve is half mirrored tiles) and the converter
+      used to drop those bits, which is what shredded the S-tunnel. Flipped
+      cells are now baked as variant blocks carrying RSDK's exact flipped
+      collision (Scene.cpp's LoadTileConfig transforms), and the roof-hanging
+      yFlip masks are honored instead of read-and-ignored. Collision storage
+      is deduplicated (an index plus 163 unique rows for GHZ), which paid for
+      the variants and then some: the 68000 program got smaller
+- [x] **Camera and player bounds from the scene, not constants.** Zone.c's
+      layer-size defaults narrowed per player position by Scene1.bin's 24
+      BoundsMarker entities, with Camera_HandleVBounds' eased camera-local
+      copy. This is what frames the act start like the original
 - [x] Sonic's own sprite on hardware sprites, frames and pivots from the pack
 - [x] Player.c's ground and air physics, RSDKv5 tile collision, Camera.c
 - [x] Work split across three processors: 68000 owns the VDP, slave SH-2 owns
@@ -58,16 +70,20 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
    in scope here.
 
 2. **FG High.** The second foreground layer, also 1024x128 blocks, currently not
-   converted at all. Another 256 KB of map, and there is only about 87 KB left
-   in the fixed 512 KB window, so this is what forces either the banked window
-   at 0x900000 or compressing the layout. Plane B is free for it once the
-   background moves to the 32X.
+   converted at all. Another 256 KB of map, and there is only about 35 KB left
+   in the fixed 512 KB window after the flip fix, so this is what forces either
+   the banked window at 0x900000 or compressing the layout. Plane B is free for
+   it once the background moves to the 32X.
+   **Measured (from Scene1.bin):** 15,618 of 131,072 cells nonempty (11.9%),
+   but spread everywhere: every 16-tile column band has content (min 17,
+   median 191, max 670 cells), so row/column skipping alone does not collapse
+   it; a sparse encoding or the banked window is a real decision, not a
+   shortcut. It uses 240 distinct tiles, 54 of them new to the tile bank, and
+   35 of the 240 do not fit any of the three stage palettes as converted
+   today, so the palette budget question is real too. Its cells also carry
+   flips, which the converter now handles for free.
 
-3. **A world clamp on the player.** The camera is clamped to the map and the
-   player is not, so walking off the edge finds no floor and falls forever. An
-   act needs ends.
-
-4. **The zone's own music.** The disc currently loops a menu track. Per-stage
+3. **The zone's own music.** The disc currently loops a menu track. Per-stage
    music cannot be found by name: the pack addresses files by the MD5 of their
    path and the stage's track is named in a scene object property the converter
    does not parse yet.
@@ -77,6 +93,12 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 - Objects of any kind: rings, springs, badniks, the goal. Out of scope by
   decision, and the thing that separates "a zone that runs" from "a zone you
   play"
+- Collision path B and plane switching, which is what makes loops and the
+  S-tunnels traversable rather than merely drawn. The layout's bits 14-15
+  (path B solidity, 17.8% of nonempty cells) and TileConfig's second path are
+  parsed nowhere yet, and the original drives the switch with PlaneSwitch and
+  ForceSpin scene objects, so this lands with the object system rather than
+  before it
 - Act 2. Its FG Low is 1280x96 blocks, wider still than Act 1
 - The palette budget is already spent: all three stage palettes go to the
   foreground and the fourth is Sonic's. FG High may not fit in what is left

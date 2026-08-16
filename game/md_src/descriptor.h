@@ -24,13 +24,22 @@
 #define BG_MAP_H 24
 
 /* Lets the slave SH2 reach the stage/character assets that are linked into
- * this 68000 program only: ghz_map/ghz_collide (md_src/assets.s's .incbin)
- * and sonic_frames/sonic_anims (md_src/sonic_data.c's generated array
- * literals). The SH2 has no visibility into this program's symbol table, so
- * it needs the addresses handed to it explicitly; see sh_src/assets.h for
- * the other half of this mechanism.
+ * this 68000 program only: ghz_map/ghz_collide_index/ghz_collide_rows
+ * (md_src/assets.s's .incbin) and sonic_frames/sonic_anims (md_src/
+ * sonic_data.c's generated array literals). The SH2 has no visibility into
+ * this program's symbol table, so it needs the addresses handed to it
+ * explicitly; see sh_src/assets.h for the other half of this mechanism.
  *
- * The four pointer fields are raw 68000 addresses, deliberately uint32_t
+ * ghz_collide_index/ghz_collide_rows split what used to be one ghz_collide[]
+ * array: tools/convert_stage.py now dedups identical 70-byte collision rows
+ * (many blocks -- different tiles, or flip variants whose masks happen to be
+ * symmetric -- share one), storing each unique row once in ghz_collide_rows
+ * and one row-number-per-block in ghz_collide_index. Cut collide.bin from
+ * 51,100 to 12,870 bytes on GHZ (163 unique rows for 730 blocks), which is
+ * what brought the 68000 program back under its 512 KB ROM window.
+ *
+ * The five pointer fields (ghz_map, ghz_collide_index, ghz_collide_rows,
+ * sonic_frames, sonic_anims) are raw 68000 addresses, deliberately uint32_t
  * rather than a typed pointer, so SH2 code cannot dereference one directly
  * without going through md_addr_to_sh2() (sh_src/assets.h). ghz_map_w and
  * ghz_map_h are not addresses at all, just GHZ_MAP_W/GHZ_MAP_H carried
@@ -46,9 +55,10 @@
  * cartridge-relative offset.
  *
  * bg_pal/bg_blocks/bg_map/bg_lines (tools/convert_bg.py's output, pulled in
- * by md_src/assets.s the same way as ghz_map/ghz_collide above) follow the
- * identical convention: raw addresses, converted through md_addr_to_sh2()
- * the same way. The only difference is who reads them -- the master SH2
+ * by md_src/assets.s the same way as ghz_map/ghz_collide_index/
+ * ghz_collide_rows above) follow the identical convention: raw addresses,
+ * converted through md_addr_to_sh2() the same way. The only difference is
+ * who reads them -- the master SH2
  * (sh_src/m_main.c via sh_src/bg.c), not the slave, since the master owns
  * the framebuffer and the slave owns nothing background-related. bg_map is
  * BG_MAP_W x BG_MAP_H (below) blocks, fixed here rather than published at
@@ -58,7 +68,7 @@
  * own reported "map W x H".
  *
  * screenCenterY (SCREEN_HALF_H - 16, PAL/NTSC-aware) deliberately is NOT a
- * field here. Unlike the four data pointers, all of which are link-time
+ * field here. Unlike the nine data pointers above, all of which are link-time
  * constants, screenCenterY is only known once vdp_init() has read the
  * PAL/NTSC hardware bit at runtime, and this struct's storage is genuinely
  * read-only ROM once the cartridge is flashed: an ordinary bus write to a
@@ -71,16 +81,19 @@
  * descriptor offset at boot before being reinterpreted for steady-state use.
  * See comm_boot_publish() in comm.c and assets_init() in sh_src/assets.c. */
 typedef struct {
-	uint32_t ghz_map;       /* address of ghz_map[] */
-	uint32_t ghz_collide;   /* address of ghz_collide[] */
-	uint32_t sonic_frames;  /* address of sonic_frames[] */
-	uint32_t sonic_anims;   /* address of sonic_anims[] */
-	uint32_t ghz_map_w;     /* GHZ_MAP_W, FG Low width in blocks */
-	uint32_t ghz_map_h;     /* GHZ_MAP_H, FG Low height in blocks */
-	uint32_t bg_pal;        /* address of bg_pal[]: 256 CRAM words, big endian */
-	uint32_t bg_blocks;     /* address of bg_blocks[]: 16x16 8bpp blocks */
-	uint32_t bg_map;        /* address of bg_map[]: BG_MAP_W x BG_MAP_H block indices */
-	uint32_t bg_lines;      /* address of bg_lines[]: parallax/speed pair per bg row */
+	uint32_t ghz_map;           /* address of ghz_map[] */
+	uint32_t ghz_collide_index; /* address of ghz_collide_index[]: one u16
+	                             * per block, row number into ghz_collide_rows */
+	uint32_t ghz_collide_rows;  /* address of ghz_collide_rows[]: the
+	                             * deduplicated 70-byte collision rows */
+	uint32_t sonic_frames;      /* address of sonic_frames[] */
+	uint32_t sonic_anims;       /* address of sonic_anims[] */
+	uint32_t ghz_map_w;         /* GHZ_MAP_W, FG Low width in blocks */
+	uint32_t ghz_map_h;         /* GHZ_MAP_H, FG Low height in blocks */
+	uint32_t bg_pal;            /* address of bg_pal[]: 256 CRAM words, big endian */
+	uint32_t bg_blocks;         /* address of bg_blocks[]: 16x16 8bpp blocks */
+	uint32_t bg_map;            /* address of bg_map[]: BG_MAP_W x BG_MAP_H block indices */
+	uint32_t bg_lines;          /* address of bg_lines[]: parallax/speed pair per bg row */
 } AssetDescriptor;
 
 extern const AssetDescriptor asset_descriptor;

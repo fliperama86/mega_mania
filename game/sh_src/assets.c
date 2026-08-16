@@ -6,7 +6,8 @@
  * matching externs rather than including this file, keeping them free of
  * any descriptor/comm knowledge. */
 const uint16_t *g_ghz_map;
-const uint8_t *g_ghz_collide;
+const uint16_t *g_ghz_collide_index;
+const uint8_t *g_ghz_collide_rows;
 const SonicFrame *g_sonic_frames;
 const SonicAnim *g_sonic_anims;
 uint16_t g_map_w, g_map_h;
@@ -33,13 +34,14 @@ uint32_t assets_init(void)
 	 * conversion function as every field inside it, never open-coded. */
 	desc = (const AssetDescriptor *)md_addr_to_sh2(descAddr);
 
-	g_ghz_map      = (const uint16_t *)md_addr_to_sh2(desc->ghz_map);
-	g_ghz_collide  = (const uint8_t *)md_addr_to_sh2(desc->ghz_collide);
-	g_sonic_frames = (const SonicFrame *)md_addr_to_sh2(desc->sonic_frames);
-	g_sonic_anims  = (const SonicAnim *)md_addr_to_sh2(desc->sonic_anims);
+	g_ghz_map           = (const uint16_t *)md_addr_to_sh2(desc->ghz_map);
+	g_ghz_collide_index = (const uint16_t *)md_addr_to_sh2(desc->ghz_collide_index);
+	g_ghz_collide_rows  = (const uint8_t *)md_addr_to_sh2(desc->ghz_collide_rows);
+	g_sonic_frames      = (const SonicFrame *)md_addr_to_sh2(desc->sonic_frames);
+	g_sonic_anims       = (const SonicAnim *)md_addr_to_sh2(desc->sonic_anims);
 	/* plain counts, not addresses: no md_addr_to_sh2() conversion */
-	g_map_w        = (uint16_t)desc->ghz_map_w;
-	g_map_h        = (uint16_t)desc->ghz_map_h;
+	g_map_w             = (uint16_t)desc->ghz_map_w;
+	g_map_h             = (uint16_t)desc->ghz_map_h;
 
 	return screenCenterY;
 }

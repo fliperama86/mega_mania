@@ -25,9 +25,21 @@ ghz_map:
 ghz_bgmap:
 	.incbin "../assets/ghz/map_bg.bin"
 
-	.global ghz_collide
-ghz_collide:
-	.incbin "../assets/ghz/collide.bin"
+| collide_rows holds each distinct 70-byte collision row once (tools/
+| convert_stage.py dedups them); collide_index has one u16 per block, the row
+| number into collide_rows for that block. collide_index is read as u16 by
+| sh_src/path.c, which needs it 2-byte aligned -- not otherwise guaranteed,
+| same reasoning as bg_blocks' .balign 4 below. collide_rows itself is read
+| a byte at a time (path.c indexes it as const uint8_t *), so it carries no
+| alignment requirement of its own.
+	.balign 2
+	.global ghz_collide_index
+ghz_collide_index:
+	.incbin "../assets/ghz/collide_index.bin"
+
+	.global ghz_collide_rows
+ghz_collide_rows:
+	.incbin "../assets/ghz/collide_rows.bin"
 
 	.global sonic_pal
 sonic_pal:
