@@ -193,3 +193,9 @@ md_src/assets.o: $(RES)
 # (see sh_src/map_fgh.s): it's linked into the SH2 program instead, so the
 # reassembly dependency belongs on that object file, not on assets.o.
 sh_src/map_fgh.o: ../assets/ghz/map_fgh.bin
+
+# collide_b_index.bin/collide_b_rows.bin (RSDK collision path B) are the same
+# story as map_fgh.bin above: linked into the SH2 program directly (see
+# sh_src/collide_b.s), not pulled in by assets.s, so the reassembly
+# dependency belongs on that object file instead.
+sh_src/collide_b.o: ../assets/ghz/collide_b_index.bin ../assets/ghz/collide_b_rows.bin

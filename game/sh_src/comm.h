@@ -40,8 +40,38 @@
  *                        steady state), so it carries this one extra
  *                        one-shot value the same way COMM12 already carries
  *                        the descriptor offset before being reinterpreted.
- *                        Steady state: camera Y, same terms as camera X.
- *                        Slave writes, 68000 reads.
+ *
+ *                        Steady state: camera Y in bits [14:0], plus one bit
+ *                        COMM_ANIM's word has no room for (see its own entry
+ *                        below, which is exactly full): bit [15] is
+ *                        Player.drawGroupHigh (player.h), PlaneSwitch's other
+ *                        write alongside collisionPlane
+ *                        (PlaneSwitch_CheckCollisions, PlaneSwitch.c:94-109
+ *                        -- other->drawGroup = low/high, the mechanism
+ *                        Zone->playerDrawGroup[0]/[1] names in the original),
+ *                        telling md_src/sonic.c whether to draw Sonic's
+ *                        sprite at low or high priority against FG High.
+ *                          word = (camY & 0x7FFFu) | ((drawGroupHigh & 1u) << 15);
+ *
+ *                        Bit 15 cannot collide with a legitimate camY value,
+ *                        so this is not a stolen coordinate bit: s_main.c
+ *                        clamps the published camY every frame to at most
+ *                        `cam.boundsB - SCREEN_H` (its limitY), and
+ *                        cam.boundsB is eased toward ZoneBounds.cameraBoundsB,
+ *                        which starts at the FG layer height in px
+ *                        (bounds_init, bounds.c: `g_map_h * 16`) and is only
+ *                        ever narrowed further by BoundsMarker entries, never
+ *                        widened past the layer. GHZ Act 1's layer is 128
+ *                        blocks tall (2048 px); Act 2's 96-block layer
+ *                        (docs/green-hill.md) is smaller still. So camY tops
+ *                        out in the low thousands for any act this
+ *                        converter could plausibly produce, nowhere near bit
+ *                        15's value of 32768 -- the invariant, not a
+ *                        one-time measurement, is what makes the bit free.
+ *                        Slave writes, 68000 reads; the master SH2 (bg.c)
+ *                        also reads this register directly for its own
+ *                        parallax math and masks the same bit off before
+ *                        using camY, since it never needs drawGroupHigh.
  *
  *   COMM8  (0x20004028)  Steady state only: Sonic's world X, an int16_t bit
  *                        pattern carried in a uint16_t register. Slave
@@ -90,6 +120,15 @@
  *       bit  [0]    facing: 0 = right, 1 = left, matching Player.direction.
  *     word = ((uint16_t)seq << 8) | ((frameIndex & 0x7Fu) << 1) | (facing & 1u);
  *
+ *     This word is exactly full (8+7+1 = 16 bits): seq needs its full 8 bits
+ *     (the seqlock's whole reason to be a uint8_t, not a narrower counter,
+ *     is in the paragraph above), and frameIndex's 7 bits are the minimum
+ *     for the current 106-entry sonic_frames[] table (106 > 2^6, so 6 bits
+ *     is not enough -- "comfortably under the limit" above describes
+ *     headroom in the VALUE 106 has against 127, not a spare BIT position).
+ *     drawGroupHigh rides COMM6's bit 15 instead -- see that register's
+ *     entry above for why there was room there and not here.
+ *
  *   . lower 16 bits, address 0x2000402E (COMM_TICK here; there is no
  *     existing MARS_SYS_COMM14 in mars.h, so this is a wholly new macro,
  *     kept in this file rather than added to mars.h to keep every new
@@ -104,11 +143,19 @@
  * results through COMM8, the same register its joypad arrives in, which
  * caused a real bug when the two uses collided. Every field above has
  * exactly one steady-state role and one owner; nothing here is multiplexed
- * onto a register something else is concurrently using for a different
- * purpose (COMM6 and COMM12's dual boot/steady-state roles are the one
- * exception, and they are safe specifically because the two roles never
- * overlap in time -- the boot role is fully consumed, once, before the
- * steady-state role is ever written).
+ * onto a register something else is concurrently using for a different,
+ * temporally-overlapping purpose. Two registers deviate from "one role per
+ * register," in two different, both-safe ways: COMM6 and COMM12 carry a
+ * boot-time role and a steady-state role that never overlap in time (the
+ * boot role is fully consumed, once, before the steady-state role is ever
+ * written); COMM6's own steady-state role additionally packs two fields
+ * (camY, drawGroupHigh) into one word, safe not because the two are
+ * temporally separated -- they are both live every steady-state frame --
+ * but because an invariant on camY's own range leaves bit 15 with no
+ * legitimate value ever to collide with (see COMM6's entry above). That is
+ * a different, stronger guarantee than blitbench's bug had: diagnostic
+ * writes and joypad reads on COMM8 had no such invariant keeping them
+ * apart, which is exactly why they collided.
  *
  * Frame boundary handling (comm_publish_frame/comm_read_frame):
  *
@@ -169,9 +216,11 @@
 #define COMM_TICK (*(volatile uint16_t *)0x2000402E)
 
 /* Publish one frame's worth of camera/Sonic state. Called once per observed
- * tick change from s_main.c's game loop, after player_update/path/camera. */
+ * tick change from s_main.c's game loop, after player_update/path/camera.
+ * drawGroupHigh packs into camY's bit 15 (see COMM6's entry above); pass
+ * Player.drawGroupHigh (sh_src/plane_switch.c writes it) verbatim. */
 void comm_publish_frame(uint16_t camX, uint16_t camY, int16_t worldX, int16_t worldY,
-                         uint16_t frameIndex, uint8_t facing);
+                         uint16_t frameIndex, uint8_t facing, uint8_t drawGroupHigh);
 
 /* Blocks until the 68000 publishes a new tick, then returns the pad byte
  * that arrived atomically with it. */

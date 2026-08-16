@@ -26,8 +26,13 @@ uint16_t sonic_gfx_init(uint16_t firstTile);
 void sonic_upload(uint16_t frameIndex);
 
 /* Fill sprite entries for the current frame at a screen position, linking them
- * so the caller can chain the rest of its list. Returns how many were used. */
+ * so the caller can chain the rest of its list. Returns how many were used.
+ * drawGroupHigh (0 low, 1 high) sets every piece's sprite priority --
+ * Player.drawGroupHigh (sh_src/player.h), PlaneSwitch_CheckCollisions'
+ * other write alongside collisionPlane (PlaneSwitch.c:94-109), the same
+ * Zone->playerDrawGroup[0]/[1] mechanism the original uses to draw Sonic
+ * above or below FG High. */
 uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
-                     VDPSprite *list, uint16_t firstLink);
+                     uint8_t drawGroupHigh, VDPSprite *list, uint16_t firstLink);
 
 #endif

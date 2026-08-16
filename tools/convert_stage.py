@@ -21,11 +21,12 @@ Emits into <outdir>:
                  entry's full solidity nibble unmasked: bit 12 floor solid,
                  bit 13 wall and roof solid (RSDK path A, tested explicitly
                  by game/md_src/main.c:39-41's MAP_SOLID_FLOOR/MAP_SOLID_SIDES
-                 and game/sh_src/path.c:37-39's SOLID_FLOOR/SOLID_SIDES),
-                 bits 14-15 RSDK path B (carried through but not tested by
-                 anything yet -- see collide_rows.bin below). The block index
-                 mask (MAP_BLOCK_MASK, both files above) is 0x0FFF, so bits
-                 12-15 riding along unmasked cost nothing today.
+                 and game/sh_src/path.c's plane-0 solid bits), bits 14-15 the
+                 same pair for RSDK path B (game/sh_src/path.c's plane-1
+                 solid bits, selected per PathEntity.collisionPlane -- see
+                 collide_b_rows.bin above). The block index mask
+                 (MAP_BLOCK_MASK, both files above) is 0x0FFF, so bits 12-15
+                 riding along unmasked cost nothing.
     map_fgh.bin  FG High layout (loop fronts, overhangs), same format and
                  dimensions as map_fg.bin -- the runtime has no separate
                  ghz_map_w/ghz_map_h for it, it reuses FG Low's published
@@ -36,11 +37,9 @@ Emits into <outdir>:
     collide_rows.bin   each DISTINCT 70-byte collision row once (floor, left
                  wall, right wall and roof masks of 16 each, then the four
                  angles, the flag and a pad byte to keep the stride even),
-                 first-encounter order over blocks.bin's block order. Rows
-                 only ever encode RSDK path A (TileConfig path 0, see
-                 load_collision below) -- path B's bits 14-15 in the map
-                 files above have no matching row of their own yet; that is
-                 deferred until path B collision support lands.
+                 first-encounter order over blocks.bin's block order.
+                 Encodes RSDK path A (TileConfig path 0, see load_collision
+                 below); matches map_fg.bin/map_fgh.bin's bits 12-13.
     collide_index.bin  one big-endian u16 per block (base or flip variant,
                  same order as blocks.bin): the row number into
                  collide_rows.bin for that block. Many blocks share a row
@@ -49,6 +48,15 @@ Emits into <outdir>:
                  usually much smaller than blocks*70 bytes -- see
                  game/md_src/descriptor.h's ghz_collide_index/
                  ghz_collide_rows comment for why that saving matters
+    collide_b_rows.bin  same layout as collide_rows.bin, one DISTINCT row per
+                 RSDK path B (TileConfig path 1) shape -- its own dedup pass,
+                 not a shared table with path A: two blocks whose path-A rows
+                 happen to match can still differ on path B, and vice versa.
+                 Encodes bits 14-15 of the map files above.
+    collide_b_index.bin  same layout as collide_index.bin (block order
+                 identical to it and to blocks.bin -- only the row content a
+                 block's index names is path-specific), the row number into
+                 collide_b_rows.bin for that block.
 
 Block 0 is blank and block 1 is a visible X, so empty map cells read as sky
 while anything that failed conversion shows up as an obvious marker.
@@ -109,11 +117,17 @@ def md_word(c):
     return (c[2] << 9) | (c[1] << 5) | (c[0] << 1)
 
 
-def load_collision(pack, stage, paths=1, tiles=1024):
+def load_collision(pack, stage, tiles=1024):
     """TileConfig.bin: per collision path, per tile, 16 height bytes, 16
-    active bytes, then yFlip, floor/lWall/rWall/roof angles and a flag.
-    Only path 0 is needed for now (RSDK path A; path B is bits 14-15 of the
-    scene entry, not carried yet, see the module docstring).
+    active bytes, then yFlip, floor/lWall/rWall/roof angles and a flag. Both
+    paths are built -- path 0 (RSDK path A) and path 1 (RSDK path B, the
+    scene entry's bits 14-15) -- with identical per-tile logic; the yFlip
+    handling and wall-rotation loops below apply the same way regardless of
+    which path's bytes are being read, since the file format repeats the same
+    per-tile layout once per path (RETRO_REV0U's collisionMasks[plane] /
+    tileInfo[plane] are just two instances of the one LoadTileConfig shape).
+    Returns (pathA, pathB), each {tile: row} keyed the same as the old
+    single-path return value.
 
     yFlip (Scene.cpp:753-808) is a Mania tile-authoring flag baked into the
     tile's own collision shape -- unrelated to the per-cell flipX/flipY a
@@ -121,12 +135,12 @@ def load_collision(pack, stage, paths=1, tiles=1024):
     below handle separately."""
     data = pack.read(f"Data/Stages/{stage}/TileConfig.bin")
     if data is None or data[:3] != b"TIL":
-        return None
+        return None, None
     r = scene.Reader(data)
     r.p = 4
     buf = r.compressed()
 
-    out = {}
+    out = [{}, {}]
     pos = 0
     for p in range(2):
         for t in range(tiles):
@@ -138,71 +152,71 @@ def load_collision(pack, stage, paths=1, tiles=1024):
             rwa = buf[pos]; pos += 1
             roofa = buf[pos]; pos += 1
             flag = buf[pos]; pos += 1
-            if p == 0:
-                if yflip:
-                    # A yFlip tile hangs its mask from the roof instead of
-                    # the floor: floor is "no gap" (0x00) wherever active,
-                    # and the stored heights become the roof. Scene.cpp:753-762.
-                    floors = [0x00 if active[c] else 0xFF for c in range(16)]
-                    roof = [heights[c] if active[c] else 0xFF for c in range(16)]
 
-                    # Wall rotations scan the ROOF masks with c <= m, the
-                    # mirror of the regular-tile scan below (FLOOR masks,
-                    # c >= m). Scene.cpp:766-785 (lwall), 788-807 (rwall).
-                    lwall = []
-                    for c in range(16):
-                        h = 0
-                        while True:
-                            if h == 16:
-                                lwall.append(0xFF); break
-                            m = roof[h]
-                            if m != 0xFF and c <= m:
-                                lwall.append(h); break
-                            h += 1
-                    rwall = []
-                    for c in range(16):
-                        h = 15
-                        while True:
-                            if h == -1:
-                                rwall.append(0xFF); break
-                            m = roof[h]
-                            if m != 0xFF and c <= m:
-                                rwall.append(h); break
-                            h -= 1
-                else:
-                    floors = [heights[c] if active[c] else 0xFF for c in range(16)]
+            if yflip:
+                # A yFlip tile hangs its mask from the roof instead of
+                # the floor: floor is "no gap" (0x00) wherever active,
+                # and the stored heights become the roof. Scene.cpp:753-762.
+                floors = [0x00 if active[c] else 0xFF for c in range(16)]
+                roof = [heights[c] if active[c] else 0xFF for c in range(16)]
 
-                    # Wall masks are not stored; RSDK rotates the floor masks in
-                    # LoadTileConfig and this reproduces those loops exactly.
-                    # Scene.cpp:824-843 (lwall), 845-865 (rwall).
-                    lwall = []
-                    for c in range(16):
-                        h = 0
-                        while True:
-                            if h == 16:
-                                lwall.append(0xFF); break
-                            m = floors[h]
-                            if m != 0xFF and c >= m:
-                                lwall.append(h); break
-                            h += 1
-                    rwall = []
-                    for c in range(16):
-                        h = 15
-                        while True:
-                            if h == -1:
-                                rwall.append(0xFF); break
-                            m = floors[h]
-                            if m != 0xFF and c >= m:
-                                rwall.append(h); break
-                            h -= 1
+                # Wall rotations scan the ROOF masks with c <= m, the
+                # mirror of the regular-tile scan below (FLOOR masks,
+                # c >= m). Scene.cpp:766-785 (lwall), 788-807 (rwall).
+                lwall = []
+                for c in range(16):
+                    h = 0
+                    while True:
+                        if h == 16:
+                            lwall.append(0xFF); break
+                        m = roof[h]
+                        if m != 0xFF and c <= m:
+                            lwall.append(h); break
+                        h += 1
+                rwall = []
+                for c in range(16):
+                    h = 15
+                    while True:
+                        if h == -1:
+                            rwall.append(0xFF); break
+                        m = roof[h]
+                        if m != 0xFF and c <= m:
+                            rwall.append(h); break
+                        h -= 1
+            else:
+                floors = [heights[c] if active[c] else 0xFF for c in range(16)]
 
-                    # RSDK gives a regular tile a flat roof mask wherever the
-                    # column is active, see LoadTileConfig, Scene.cpp:815
-                    roof = [0x0F if active[c] else 0xFF for c in range(16)]
+                # Wall masks are not stored; RSDK rotates the floor masks in
+                # LoadTileConfig and this reproduces those loops exactly.
+                # Scene.cpp:824-843 (lwall), 845-865 (rwall).
+                lwall = []
+                for c in range(16):
+                    h = 0
+                    while True:
+                        if h == 16:
+                            lwall.append(0xFF); break
+                        m = floors[h]
+                        if m != 0xFF and c >= m:
+                            lwall.append(h); break
+                        h += 1
+                rwall = []
+                for c in range(16):
+                    h = 15
+                    while True:
+                        if h == -1:
+                            rwall.append(0xFF); break
+                        m = floors[h]
+                        if m != 0xFF and c >= m:
+                            rwall.append(h); break
+                        h -= 1
 
-                out[t] = (bytes(floors), bytes(lwall), bytes(rwall),
-                          bytes(roof), floor, lwa, rwa, roofa, flag)
-    return out
+                # RSDK gives a regular tile a flat roof mask wherever the
+                # column is active, see LoadTileConfig, Scene.cpp:815
+                roof = [0x0F if active[c] else 0xFF for c in range(16)]
+
+            out[p][t] = (bytes(floors), bytes(lwall), bytes(rwall),
+                         bytes(roof), floor, lwa, rwa, roofa, flag)
+    return out[0], out[1]
 
 
 def flip_x_collision(row):
@@ -410,11 +424,13 @@ def main():
     # created; the old code loaded this after and re-derived tile-from-block
     # by reverse-scanning block_of at write time, which has no entry for a
     # flip-variant block (variants are never in block_of, only in blocks).
-    collision = load_collision(pack, stage)
+    # collision/collision_b are keyed by tile, same shape, one dict per path.
+    collision, collision_b = load_collision(pack, stage)
 
     blocks = [[BLANK] * 4, [PLACEHOLDER] * 4]
     block_of = {}
     block_collision = {}
+    block_collision_b = {}
     remapped = 0
 
     for t in sorted(keep, key=lambda t: -usage[t]):
@@ -443,6 +459,8 @@ def main():
         block_of[t] = len(blocks)
         if collision and t in collision:
             block_collision[len(blocks)] = collision[t]
+        if collision_b and t in collision_b:
+            block_collision_b[len(blocks)] = collision_b[t]
         blocks.append(entries)
 
     # Flip-variant blocks, created on demand by the map loop below as
@@ -473,6 +491,19 @@ def main():
                 block_collision[b] = flip_x_collision(row)
             else:
                 block_collision[b] = flip_y_collision(row)
+        # Same flip transform, applied to path B's row for this base block --
+        # the transforms (Scene.cpp:869-949) operate on a row's own bytes,
+        # blind to which TileConfig path produced them, so this is not a
+        # second implementation, just the same three functions called again
+        # against block_collision_b instead of block_collision.
+        row_b = block_collision_b.get(base_b)
+        if row_b is not None:
+            if flip_x and flip_y:
+                block_collision_b[b] = flip_xy_collision(row_b)
+            elif flip_x:
+                block_collision_b[b] = flip_x_collision(row_b)
+            else:
+                block_collision_b[b] = flip_y_collision(row_b)
         return b
 
     maps = {}
@@ -592,6 +623,45 @@ def main():
         unique_rows = len(row_bytes_list)
         print(f"  collision           {len(blocks)} blocks, {solid} solid, "
               f"{unique_rows} unique rows")
+
+    unique_rows_b = 0
+    if collision_b:
+        # Path B's own dedup pass, mirroring path A's immediately above --
+        # same block order (len(blocks) iteration, same as path A) so
+        # collide_b_index.bin lines up with blocks.bin/collide_index.bin
+        # block-for-block, but a separate row_index/row_bytes_list: path B's
+        # row content is independent of path A's, so the two paths' rows are
+        # never deduped against each other, only within themselves.
+        row_index = {}
+        row_bytes_list = []
+        indices = []
+        solid = 0
+        for i in range(len(blocks)):
+            row = block_collision_b.get(i)
+            if row is None:
+                row_bytes = b"\xff" * 64 + bytes(6)
+            else:
+                fl, lw, rw, rf, fa, la, ra, roa, flag = row
+                row_bytes = fl + lw + rw + rf + bytes([fa, la, ra, roa, flag, 0])
+                if any(c != 0xFF for c in fl):
+                    solid += 1
+            ri = row_index.get(row_bytes)
+            if ri is None:
+                ri = len(row_bytes_list)
+                row_index[row_bytes] = ri
+                row_bytes_list.append(row_bytes)
+            indices.append(ri)
+
+        with open(f"{out}/collide_b_index.bin", "wb") as f:
+            for ri in indices:
+                f.write(struct.pack(">H", ri))
+        with open(f"{out}/collide_b_rows.bin", "wb") as f:
+            for row_bytes in row_bytes_list:
+                f.write(row_bytes)
+
+        unique_rows_b = len(row_bytes_list)
+        print(f"  collision path B    {len(blocks)} blocks, {solid} solid, "
+              f"{unique_rows_b} unique rows")
 
     print(f"stage {stage} -> {out}")
     print(f"  tiles used          {len(keep)}  ({len(exact)} fitted exactly)")

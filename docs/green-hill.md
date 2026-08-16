@@ -52,6 +52,32 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
       original carries. The palette scare evaporated: refitting with FG High
       included left pal.bin byte-identical, 213 of its 240 tiles fit exactly,
       27 remap. 60 VPS in ares with the doubled plane streaming
+- [x] **Collision path B, PlaneSwitch and ForceSpin -- loops and S-tunnels are
+      traversable, not merely drawn.** TileConfig's second path is now parsed
+      alongside the first (`tools/convert_stage.py`, 179 unique rows for GHZ
+      against path A's 166, its own independent dedup pass) and linked
+      straight into the SH2 program (`sh_src/collide_b.s`) rather than riding
+      the 68000 program the way path A's descriptor route historically does:
+      collision is a slave-SH2-only concern, so path B has no reason to spend
+      any of that program's 512 KB window. Every finder in `sh_src/path.c`
+      now picks its solid bits and its row table off
+      `PathEntity.collisionPlane`, each transcribed from RSDKv5's own
+      per-finder `solid =` line rather than one blanket rule (the air
+      collision family reads a different bit pairing than the ground
+      position finders do). `sh_src/plane_switch.c` ports
+      `PlaneSwitch_CheckCollisions` itself: 106 scene markers (Mania filter)
+      that rotate the player into the marker's own frame and flip
+      collisionPlane -- and draw group -- on the correct side, applied every
+      frame in scene slot order alongside ForceSpin (the loop-entry
+      force-roll tube, `sh_src/force_spin.c`, landed earlier but undocumented
+      until now) and BoundsMarker. The draw-group half now reaches Sonic's
+      sprite too: `Player.drawGroupHigh` rides bit 15 of COMM6, the same
+      register camera Y already used -- not a stolen coordinate bit, but an
+      invariant-backed one, since camera Y is provably clamped well under
+      2^15 for any act this converter could produce (`sh_src/comm.h`'s COMM6
+      entry has the exact clamp chain). `md_src/sonic.c`'s sprite priority
+      now follows that bit instead of a fixed low, matching
+      `PlaneSwitch_CheckCollisions`' `other->drawGroup` write
 
 ## Next
 
@@ -65,12 +91,6 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 - Objects of any kind: rings, springs, badniks, the goal. Out of scope by
   decision, and the thing that separates "a zone that runs" from "a zone you
   play"
-- Collision path B and plane switching, which is what makes loops and the
-  S-tunnels traversable rather than merely drawn. The layout's bits 14-15
-  (path B solidity, 17.8% of nonempty cells) and TileConfig's second path are
-  parsed nowhere yet, and the original drives the switch with PlaneSwitch and
-  ForceSpin scene objects, so this lands with the object system rather than
-  before it
 - Act 2. Its FG Low is 1280x96 blocks, wider still than Act 1
 - The palette budget held after all: FG High fit into the three stage
   palettes with pal.bin unchanged. Act 2 will re-ask the question

@@ -16,6 +16,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->e.velX = p->e.velY = 0;
 	p->e.angle = 0;
 	p->e.collisionMode = CMODE_FLOOR;
+	p->e.collisionPlane = 0;
 	/* Already standing, not dropped in. The original hands control over with
 	 * the player grounded: the title card plays over a settled camera, and
 	 * the scene's spawn sits at the surface rather than above it. Starting
@@ -29,6 +30,9 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->camAdjustY = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
+	/* Zone->playerDrawGroup[0], the low group -- see player.h's field
+	 * comment and sh_src/plane_switch.c. */
+	p->drawGroupHigh = 0;
 	p->minJogVelocity = 0x40000;
 	p->minRunVelocity = 0x60000;
 	p->minDashVelocity = 0xC0000;

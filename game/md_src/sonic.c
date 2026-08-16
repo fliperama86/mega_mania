@@ -29,7 +29,7 @@ void sonic_upload(uint16_t frameIndex)
 }
 
 uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
-                     VDPSprite *list, uint16_t firstLink)
+                     uint8_t drawGroupHigh, VDPSprite *list, uint16_t firstLink)
 {
 	const SonicFrame *f = frame_at(frameIndex);
 	const SonicPiece *p = &sonic_pieces[f->pieceOffset];
@@ -45,17 +45,23 @@ uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
 		list[i].y = 128 + sy + f->pivotY + p->dy;
 		list[i].size = p->size;
 		list[i].link = firstLink + i + 1;
-		/* Low priority: FG Low (Plane A, always low) belongs behind Sonic and
-		 * FG High (Plane B, always high -- see main.c's draw_block_column/
-		 * row) belongs in front of him, matching Mania's FG High-above-player
-		 * stacking. That needs Sonic between the two, which the Genesis VDP's
+		/* Priority follows drawGroupHigh instead of being fixed low: FG Low
+		 * (Plane A, always low) belongs behind Sonic and FG High (Plane B,
+		 * always high -- see main.c's draw_block_column/row) belongs in
+		 * front of him only while drawGroupHigh is set, matching Mania's
+		 * PlaneSwitch_CheckCollisions (PlaneSwitch.c:94-109: other->drawGroup
+		 * = low/high, chosen off the marker's flags bits the player crossed
+		 * on the correct side of -- the same Zone->playerDrawGroup[0]/[1]
+		 * mechanism the original names) rather than the fixed above-player
+		 * stacking this port drew before PlaneSwitch existed. That needs
+		 * Sonic able to sit between the two planes, which the Genesis VDP's
 		 * fixed layer order only gives a low-priority sprite: back to front,
 		 * Plane B low, Plane A low, sprite low, Plane B high, Plane A high,
-		 * sprite high. High priority here would draw Sonic above FG High too
-		 * and defeat the stacking; before FG High existed this bit did
-		 * nothing observable, since it only had all-low Plane A to be above
-		 * either way. */
-		list[i].attr = TILE_ATTR(SONIC_PAL, 0, 0, flip, vramTile + p->tile);
+		 * sprite high -- high priority here draws Sonic above FG High, low
+		 * draws him below it. drawGroupHigh arrives from the slave SH2 over
+		 * COMM6's bit 15 (sh_src/comm.h; sh_src/plane_switch.c ports
+		 * PlaneSwitch_CheckCollisions itself). */
+		list[i].attr = TILE_ATTR(SONIC_PAL, drawGroupHigh, 0, flip, vramTile + p->tile);
 		list[i].x = 128 + sx + dx;
 	}
 	return f->pieceCount;

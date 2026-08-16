@@ -10,7 +10,7 @@
  * are the boot handshake (md_start.s) and are never touched here. */
 
 #define MD_COMM2     (*(volatile uint16_t *)0xA15122) /* boot: descriptor-ready flag; steady state: camera X */
-#define MD_COMM6     (*(volatile uint16_t *)0xA15126) /* boot: screenCenterY; steady state: camera Y */
+#define MD_COMM6     (*(volatile uint16_t *)0xA15126) /* boot: screenCenterY; steady state: camera Y in bits [14:0], Player.drawGroupHigh in bit 15 (sh_src/comm.h) */
 #define MD_COMM8     (*(volatile uint16_t *)0xA15128) /* steady state: Sonic world X */
 #define MD_COMM10    (*(volatile uint16_t *)0xA1512A) /* steady state: Sonic world Y */
 #define MD_COMM12    (*(volatile uint32_t *)0xA1512C) /* boot only: descriptor offset, 32-bit */
@@ -28,9 +28,13 @@ void comm_boot_publish(uint32_t descriptorOffset, uint16_t screenCenterY);
  * otherwise, so the caller never has to special-case a "no new data" return.
  * Returns 0 only until the very first frame has been consumed (for the
  * one-time startup block main() does before it has any camera/Sonic state
- * to draw with); nonzero on every call after that. */
+ * to draw with); nonzero on every call after that. *camY comes back already
+ * masked to bits [14:0] -- drawGroupHigh is extracted from COMM6's bit 15
+ * here, once, so no caller needs to know that camera Y and drawGroupHigh
+ * ever shared a register (sh_src/comm.h's COMM6 entry has the packing and
+ * the invariant that makes it safe). */
 int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *worldY,
-                     uint16_t *frameIndex, uint8_t *facing);
+                     uint16_t *frameIndex, uint8_t *facing, uint8_t *drawGroupHigh);
 
 /* Steady state: bumps the tick counter and publishes it with the pad byte,
  * atomically, in one 16-bit store. Call immediately after pad_read(), before

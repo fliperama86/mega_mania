@@ -33,6 +33,11 @@ typedef struct {
 	uint8_t angle;
 	uint8_t collisionMode;
 	uint8_t onGround;
+	uint8_t collisionPlane; /* RSDK's collisionEntity->collisionPlane: 0 or 1,
+	                          * selects which of the two TileConfig paths (and
+	                          * which map solidity bits) every finder in
+	                          * path.c tests. Written only by plane_switch.c;
+	                          * see sh_src/plane_switch.c. */
 } PathEntity;
 
 void path_grip(PathEntity *e);

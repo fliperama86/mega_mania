@@ -62,6 +62,13 @@ typedef struct {
 	int16_t skidding;
 	/* Animation thresholds carry hysteresis, so they are state, not constants */
 	int32_t minJogVelocity, minRunVelocity, minDashVelocity;
+	/* PlaneSwitch_CheckCollisions' other write, alongside e.collisionPlane
+	 * (PlaneSwitch.c:94-109): 0 low, 1 high, matching Zone->playerDrawGroup[0]
+	 * (low) / [1] (high) -- see sh_src/plane_switch.c. NOT YET carried over
+	 * the comm protocol to md_src/sonic.c's sprite priority: see comm.h's
+	 * packed-anim-word comment for why that leg is currently blocked on a
+	 * bit-budget question this port stops short of deciding unilaterally. */
+	uint8_t drawGroupHigh;
 } Player;
 
 /* Sonic, not underwater, no shoes: sonicPhysicsTable entries 0-7 */

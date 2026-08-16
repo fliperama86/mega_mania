@@ -51,8 +51,13 @@ static int32_t iabs(int32_t v)
  * delta down first is what keeps world-scale coordinates inside int32 -- the
  * trig tables are already scaled by 256, so (delta>>8)*trig lands back on
  * the same 16.16 scale as a plain (delta*trig)>>16 would, without ever
- * forming that wider intermediate. */
-static void rotate_on_pivot(int32_t *px, int32_t *py, int32_t ox, int32_t oy, uint8_t angle)
+ * forming that wider intermediate.
+ *
+ * Not static: plane_switch.c reuses this exact function (declared in
+ * force_spin.h) rather than duplicating it -- PlaneSwitch_CheckCollisions
+ * needs the identical rotation ForceSpin_Update does, just applied to both
+ * the player's position and its velocity (see plane_switch.c's comment). */
+void rotate_on_pivot(int32_t *px, int32_t *py, int32_t ox, int32_t oy, uint8_t angle)
 {
 	int32_t x = (*px - ox) >> 8;
 	int32_t y = (*py - oy) >> 8;

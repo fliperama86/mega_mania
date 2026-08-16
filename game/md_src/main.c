@@ -191,6 +191,7 @@ int main(void)
 	int16_t worldX = 0, worldY = 0;
 	uint16_t frameIndex = 0;
 	uint8_t facing = 0;
+	uint8_t drawGroupHigh = 0;
 	int cdPresent, cdState = 0;
 
 	/* First thing in boot, before anything else might rely on the audio
@@ -230,7 +231,8 @@ int main(void)
 	 * slave, so it waits here for the slave's first published frame before
 	 * it has anything to draw. Every later call to comm_read_frame is
 	 * non-blocking; this loop is not part of that steady-state protocol. */
-	while (!comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing)) {}
+	while (!comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing,
+	                        &drawGroupHigh)) {}
 
 	firstCol = camX >> 4;
 	firstRow = camY >> 4;
@@ -255,7 +257,8 @@ int main(void)
 
 		/* Non-blocking: on a torn or absent update this just re-delivers
 		 * the previous frame's cached camera/Sonic values. */
-		comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing);
+		comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing,
+		                &drawGroupHigh);
 
 		/* Stream every row and column that just entered view. The plane is
 		 * only VIEW_BLOCKS_X by VIEW_BLOCKS_Y and wraps in both axes, so each
@@ -295,7 +298,7 @@ int main(void)
 		used = sonic_build(frameIndex,
 		                   worldX - (int16_t)camX,
 		                   worldY - (int16_t)camY,
-		                   facing, list, 0);
+		                   facing, drawGroupHigh, list, 0);
 		list[used - 1].link = 0;
 
 		/* A frame counter next to the raw pad bits: on real hardware this is

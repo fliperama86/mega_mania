@@ -456,9 +456,15 @@ void bg_init(void)
 	 * COMM6's other roles, see comm.h) rather than real camera state --
 	 * harmless, since the very next bg_frame() corrects both, and nothing
 	 * is visibly wrong in the meantime, only mispositioned for a few
-	 * frames the way the X-only version already was. */
+	 * frames the way the X-only version already was.
+	 *
+	 * & 0x7FFFu: COMM6's steady-state word also carries Player.drawGroupHigh
+	 * in bit 15 (comm.h) -- this CPU (the master SH2) never reads that flag,
+	 * it only wants camY, so the bit has to come off before use or an
+	 * airborne-loop frame would read camY as 32768 too high and badly
+	 * mis-place every background row. */
 	camX = MARS_SYS_COMM2;
-	camY = MARS_SYS_COMM6;
+	camY = MARS_SYS_COMM6 & 0x7FFFu;
 	firstRow = layer_first_row(camY);
 	for (l = 0; l < SCREEN_HEIGHT; l++) {
 		row = (firstRow + l) % LAYER_H_PX;
@@ -503,7 +509,9 @@ void bg_init(void)
 void bg_frame(void)
 {
 	uint16_t camX = MARS_SYS_COMM2;   /* published by the slave, see comm.h */
-	uint16_t camY = MARS_SYS_COMM6;   /* same terms as camX, see comm.h */
+	/* & 0x7FFFu strips Player.drawGroupHigh (COMM6 bit 15, comm.h) -- this
+	 * CPU only wants camY, see bg_init's matching comment. */
+	uint16_t camY = MARS_SYS_COMM6 & 0x7FFFu;
 	uint16_t firstRow = layer_first_row(camY);
 	volatile uint16_t *table = &MARS_FRAMEBUFFER;
 	uint16_t delta[SCREEN_HEIGHT];

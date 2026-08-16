@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "comm.h"
 #include "force_spin.h"
+#include "plane_switch.h"
 
 /* Map size (g_map_w/g_map_h, from assets.h) comes from the descriptor the
  * 68000 publishes at boot, not a local #define: update_scroll's map-
@@ -82,6 +83,18 @@ void s_main(void)
 		 * force_spin.c's own comment for why that "every marker every frame"
 		 * shape is safe with only one player. */
 		force_spin_apply(&sonic);
+
+		/* PlaneSwitch_CheckCollisions (PlaneSwitch.c:81-113): the scene's
+		 * collision-plane markers, same "every marker every frame in slot
+		 * order" shape as force_spin_apply above and bounds_apply_markers
+		 * below -- order relative to those two does not matter, since all
+		 * three write disjoint Player/ZoneBounds fields (collisionPlane and
+		 * drawGroupHigh here, tube state and groundVel there, camera/player
+		 * bounds below). This is the piece that makes GHZ's loops and
+		 * S-tunnels traversable rather than merely drawn: without it,
+		 * collisionPlane never leaves 0 and path.c never tests the
+		 * path-B-only surfaces those cells carry. */
+		plane_switch_apply(&sonic);
 
 		/* BoundsMarker_Update (BoundsMarker.c:12-20): every marker in the
 		 * scene re-checked against the player's current position, in scene
@@ -159,6 +172,7 @@ void s_main(void)
 		worldY = (int16_t)(sonic.e.y >> 16);
 
 		comm_publish_frame(camX, camY, worldX, worldY,
-		                   sonic_anim_frame_index(&sonic.animator), sonic.direction);
+		                   sonic_anim_frame_index(&sonic.animator), sonic.direction,
+		                   sonic.drawGroupHigh);
 	}
 }

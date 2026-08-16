@@ -11,4 +11,12 @@
  * the per-marker math (ForceSpin_Update) and the table itself. */
 void force_spin_apply(Player *p);
 
+/* Zone_RotateOnPivot (SonicMania/Objects/Global/Zone.c:506-512): rotate
+ * (*px,*py) around (ox,oy) by angle. Defined in force_spin.c (ForceSpin_Update
+ * was the first caller) and exported here rather than duplicated: plane_
+ * switch.c needs the identical rotation for PlaneSwitch_CheckCollisions'
+ * position+velocity rotation -- see force_spin.c's own comment on the
+ * function for why the >>8-before-multiply order matters. */
+void rotate_on_pivot(int32_t *px, int32_t *py, int32_t ox, int32_t oy, uint8_t angle);
+
 #endif
