@@ -34,56 +34,28 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 - [x] Mega CD Mode 1 bring-up and CD audio music, with the ROM falling through
       to silence when there is no CD. Emulator only, see below
 - [x] Audio hardware silenced at boot
+- [x] **Background on the 32X.** BG Outside drawn by the master SH2 into the
+      framebuffer behind the Mega Drive planes, with its 109 scroll bands
+      through the line table: drifting cloud bands, the banded hills and the
+      per-line ground-plane gradient, at the original colours (the 32X's own
+      CRAM, not the foreground's three palettes). Landed with the "Put the
+      real Green Hill on screen" commit; this list was slow to notice
+- [x] **FG High, drawn and solid.** The second foreground layer rides Plane B
+      at high priority, which stacks it above the player the way Mania draws
+      it (Sonic's sprite priority dropped to low to match). Its 256 KB map
+      sits at cartridge offset 0x80000: the SH2 links it there directly and
+      the 68000 reads it at 0x980000 through the bankable window's reset
+      default, bank 0, so no banking code exists. mars.ld's shrunk rom region
+      turns any low-image overflow into a link error. Collision now scans
+      both layers the way Zone.c registers them, ground and air finders both,
+      with each finder carrying exactly the acceptance state its RSDKv5
+      original carries. The palette scare evaporated: refitting with FG High
+      included left pal.bin byte-identical, 213 of its 240 tiles fit exactly,
+      27 remap. 60 VPS in ares with the doubled plane streaming
 
 ## Next
 
-1. **Background on the 32X.** BG Outside is 512x24 blocks and the layer behind
-   the Mega Drive is still a placeholder gradient. The 32X is 8bpp with a
-   256 entry CRAM, so this one gets the original colours rather than the
-   foreground's three 15-colour palettes. Parallax comes from the framebuffer's
-   line table: one word offset per scanline, so independent bands cost 224 word
-   writes a frame and drift without the camera moving. The constraint is
-   storage, not time: one 128 KB bank holds the table and the image, which is
-   about 570 bytes per line at full screen height, and every line needs its own
-   width plus a screen of slack before it has to rebase.
-   **Measured, so the design does not have to guess.** The layer is 512x24
-   blocks, 8192x384 px, and it carries 109 scroll bands indexed once per pixel
-   row: lines 0-63 are three cloud bands at parallax factor 48 with their own
-   camera-independent scroll speeds, which is what makes the sky drift while
-   standing still; 64-111 at 96; 112-151 at 128; 152-254 a one-band-per-line
-   gradient from 127 to 229, which is the ground plane running away from you;
-   255-383 at 230. Every deform flag is 0, so there is no wobble table.
-
-   The art is small and the arrangement is not: each row uses between 2 and 26
-   distinct blocks, rows 17-23 are one block repeated, but the 512 column
-   layout never repeats. So the background is kept as blocks and drawn, not
-   stored as a picture. A buffer somewhat wider than the screen sits in one
-   framebuffer bank, each scanline gets its own offset word, and a 16 px column
-   is drawn ahead of the edge as a line's phase advances. Worst case, every
-   line wanting a column in the same frame, that is 224x16 bytes against the
-   71 KB a full redraw would cost. The flat bottom rows let many scanlines
-   share one stored line and buy back space.
-
-   The shimmer is a rotation of four palette entries roughly every six frames,
-   which is a couple of CRAM writes. GHZ's animated tiles are foreground only,
-   and the water line is an object rather than part of the layer, so neither is
-   in scope here.
-
-2. **FG High.** The second foreground layer, also 1024x128 blocks, currently not
-   converted at all. Another 256 KB of map, and there is only about 35 KB left
-   in the fixed 512 KB window after the flip fix, so this is what forces either
-   the banked window at 0x900000 or compressing the layout. Plane B is free for
-   it once the background moves to the 32X.
-   **Measured (from Scene1.bin):** 15,618 of 131,072 cells nonempty (11.9%),
-   but spread everywhere: every 16-tile column band has content (min 17,
-   median 191, max 670 cells), so row/column skipping alone does not collapse
-   it; a sparse encoding or the banked window is a real decision, not a
-   shortcut. It uses 240 distinct tiles, 54 of them new to the tile bank, and
-   35 of the 240 do not fit any of the three stage palettes as converted
-   today, so the palette budget question is real too. Its cells also carry
-   flips, which the converter now handles for free.
-
-3. **The zone's own music.** The disc currently loops a menu track. Per-stage
+1. **The zone's own music.** The disc currently loops a menu track. Per-stage
    music cannot be found by name: the pack addresses files by the MD5 of their
    path and the stage's track is named in a scene object property the converter
    does not parse yet.
@@ -100,8 +72,8 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
   ForceSpin scene objects, so this lands with the object system rather than
   before it
 - Act 2. Its FG Low is 1280x96 blocks, wider still than Act 1
-- The palette budget is already spent: all three stage palettes go to the
-  foreground and the fourth is Sonic's. FG High may not fit in what is left
+- The palette budget held after all: FG High fit into the three stage
+  palettes with pal.bin unchanged. Act 2 will re-ask the question
 - Music takes about 30 seconds to start. The drive sits not-ready for that long
   before playback begins; the dummy data track being 300 sectors of zeros rather
   than a valid MODE1 track is the first suspect

@@ -8,17 +8,32 @@
  *
  * The stage data is a block map rather than RSDK's tile layer, but the shape
  * is the same: a 16x16 cell with a mask per column giving the surface, and
- * solidity carried on the map entry. Collision plane is always 0 and there is
- * only one layer, so the per-plane/per-layer loops in the reference collapse
- * to a single cell_at() lookup; TILECOLLISION_UP and its ProcessAirCollision_Up
- * counterpart are dropped since nothing here runs upside-down gravity.
+ * solidity carried on the map entry. Collision plane is always 0, so the
+ * per-plane loop in the reference collapses to a single cell_at() lookup;
+ * TILECOLLISION_UP and its ProcessAirCollision_Up counterpart are dropped
+ * since nothing here runs upside-down gravity. The per-*layer* loop does NOT
+ * collapse anywhere below: the original registers both FG Low and FG High as
+ * collision layers (SonicMania/Objects/Global/Zone.c:212) and every one of
+ * RSDK's eight finders (FindFloorPosition/FindLWallPosition/FindRoofPosition/
+ * FindRWallPosition and FloorCollision/RoofCollision/LWallCollision/
+ * RWallCollision) scans both, so every finder here does too -- see each
+ * group's own comment for what state it carries across the two layers,
+ * since it is not the same shape in both groups.
  *
  * ghz_map and ghz_collide_index/ghz_collide_rows are linked into the 68000
  * program only; this SH2 side reaches them through runtime pointers assets.c
  * fills in from the descriptor table (see assets.h), not through a
- * linked-in extern array. */
+ * linked-in extern array. ghz_map_fgh (below) is different again: see its
+ * own comment. */
 
 extern const uint16_t *g_ghz_map;
+/* FG High (loop fronts, overhangs): unlike g_ghz_map above, this is not
+ * reached through the descriptor table and md_addr_to_sh2() -- it is not
+ * linked into the 68000 program at all. sh_src/map_fgh.s links it straight
+ * into this SH2 program's own image, at the fixed address sh_src/mars.ld's
+ * maphigh region gives it, so it is an ordinary linked array here, resolved
+ * by this link the same way any other extern is. */
+extern const uint16_t ghz_map_fgh[];
 /* collide_index[block] is a row number into collide_rows; convert_stage.py
  * dedups identical 70-byte rows (many blocks -- different tiles, or flip
  * variants whose masks happen to be symmetric -- share one), so this is one
@@ -65,29 +80,42 @@ static int32_t iabs(int32_t v)
 	return v < 0 ? -v : v;
 }
 
-static uint16_t cell_at(int32_t cx, int32_t cy)
+static uint16_t cell_at(const uint16_t *map, int32_t cx, int32_t cy)
 {
 	/* g_map_w/g_map_h are uint16_t, but every operand here promotes to
 	 * this build's 32-bit int (confirmed: no -mshort on either CPU)
 	 * before the multiply, same as cx/cy already were, so the row*width
-	 * term (up to 127*1024) never truncates through a 16-bit intermediate. */
+	 * term (up to 127*1024) never truncates through a 16-bit intermediate.
+	 * map_w/map_h are shared by both layouts (converter-asserted equal),
+	 * so the bounds check needs no map-specific variant. */
 	if (cx < 0 || cy < 0 || cx >= g_map_w * CELL_SIZE || cy >= g_map_h * CELL_SIZE)
 		return 0;
-	return g_ghz_map[(cy / CELL_SIZE) * g_map_w + (cx / CELL_SIZE)];
+	return map[(cy / CELL_SIZE) * g_map_w + (cx / CELL_SIZE)];
 }
 
 /* ---- position finders, one per collision mode ---------------------------- */
 
-static void find_floor(Sensor *s)
+/* One layer's worth of find_floor's probe: the original 3-cell scan,
+ * parameterized on which layout to read (map) and threaded through startY by
+ * pointer, so find_floor below can call this once per layer and have
+ * acceptance state (s->collided, *startY) carry across the two calls exactly
+ * like RSDK's FindFloorPosition carries it across its layer loop
+ * (Collision.cpp:2177-2229: outer layer loop at 2179, startY updated on
+ * accept at 2213, i=3 early-out only breaks the inner cell loop -- the early
+ * "return" below is this port's equivalent, since the inner loop is now this
+ * whole function). A real function, called twice, rather than a 2-iteration
+ * loop over {g_ghz_map, ghz_map_fgh}: on this SH2 target a small fixed-trip-
+ * count loop wrapping real work is exactly what the compiler tends to
+ * duplicate in the name of speed, and sh_src/mars.ld's shrunk rom region has
+ * no room to spare for that. */
+static void find_floor_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                              int32_t posY, int32_t *startY)
 {
-	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
 	int32_t cy = (posY & -CELL_SIZE) - CELL_SIZE;
-	int32_t colY = posY;    /* captured once; unlike startY, never updated */
-	int32_t startY = posY;  /* only gates the !collided || startY>=ty preference test */
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cy += CELL_SIZE) {
-		uint16_t cell = cell_at(posX, cy);
+		uint16_t cell = cell_at(map, posX, cy);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -100,8 +128,8 @@ static void find_floor(Sensor *s)
 		if (mask == 0xFF) continue;
 
 		ty = cy + mask;
-		if (!s->collided || startY >= ty) {
-			if (iabs(colY - ty) > collisionTolerance) continue;
+		if (!s->collided || *startY >= ty) {
+			if (iabs(posY - ty) > collisionTolerance) continue;
 
 			tileAngle = row[OFF_ANGLE + 0];
 			adiff = (int32_t)s->angle - tileAngle;
@@ -113,23 +141,40 @@ static void find_floor(Sensor *s)
 				s->y = TO_FIXED(ty);
 				s->angle = (uint8_t)tileAngle;
 				s->collided = 1;
-				startY = ty;
+				*startY = ty;
 				return;
 			}
 		}
 	}
 }
 
-static void find_roof(Sensor *s)
+static void find_floor(Sensor *s)
 {
 	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t startY = posY;  /* only gates find_floor_layer's !collided ||
+	                          * *startY>=ty preference test, but carried
+	                          * across BOTH layers below -- so FG High only
+	                          * wins over an already-accepted FG Low floor
+	                          * when it is at least as preferred, not merely
+	                          * because it is probed second. */
+
+	/* FG Low then FG High: both are registered collision layers in the
+	 * original (SonicMania/Objects/Global/Zone.c:212's collisionLayers), in
+	 * this order (Zone->fgLayer[0] is FG Low, fgLayer[1] is FG High). */
+	find_floor_layer(s, g_ghz_map, posX, posY, &startY);
+	find_floor_layer(s, ghz_map_fgh, posX, posY, &startY);
+}
+
+/* One layer's worth of find_roof's probe; see find_floor_layer's comment for
+ * why this is a real function called twice rather than a loop. */
+static void find_roof_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                             int32_t posY, int32_t *startY)
+{
 	int32_t cy = (posY & -CELL_SIZE) + CELL_SIZE;
-	int32_t colY = posY;
-	int32_t startY = posY;
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cy -= CELL_SIZE) {
-		uint16_t cell = cell_at(posX, cy);
+		uint16_t cell = cell_at(map, posX, cy);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -143,34 +188,44 @@ static void find_roof(Sensor *s)
 
 		ty = cy + mask;
 		tileAngle = row[OFF_ANGLE + 3];
-		if ((!s->collided || startY <= ty)
-		    && iabs(colY - ty) <= collisionTolerance
+		if ((!s->collided || *startY <= ty)
+		    && iabs(posY - ty) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= ROOF_ANGLE_TOLERANCE) {
 			s->y = TO_FIXED(ty);
 			s->angle = (uint8_t)tileAngle;
 			s->collided = 1;
-			startY = ty;
+			*startY = ty;
 			return;
 		}
 	}
 }
 
-static void find_lwall(Sensor *s)
+static void find_roof(Sensor *s)
 {
 	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t startY = posY;  /* carried across both layers, see find_floor */
+
+	find_roof_layer(s, g_ghz_map, posX, posY, &startY);
+	find_roof_layer(s, ghz_map_fgh, posX, posY, &startY);
+}
+
+/* One layer's worth of find_lwall's probe; see find_floor_layer's comment
+ * for why this is a real function called twice rather than a loop. */
+static void find_lwall_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                              int32_t posY, int32_t *startX)
+{
 	int32_t cx = (posX & -CELL_SIZE) - CELL_SIZE;
-	int32_t colX = posX;
-	int32_t startX = posX;
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cx += CELL_SIZE) {
-		uint16_t cell = cell_at(cx, posY);
+		uint16_t cell = cell_at(map, cx, posY);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
 		int32_t tx, tileAngle;
 
-		/* unlike the floor/roof finders, either solid bit blocks a wall */
+		/* unlike the floor/roof finders, either solid bit blocks a wall,
+		 * matching Collision.cpp:2236 */
 		if (!(cell & (SOLID_FLOOR | SOLID_SIDES))) continue;
 		b = cell & BLOCK_MASK;
 		row = &g_ghz_collide_rows[(uint32_t)g_ghz_collide_index[b] * STRIDE];
@@ -179,28 +234,37 @@ static void find_lwall(Sensor *s)
 
 		tx = cx + mask;
 		tileAngle = row[OFF_ANGLE + 1];
-		if ((!s->collided || startX >= tx)
-		    && iabs(colX - tx) <= collisionTolerance
+		if ((!s->collided || *startX >= tx)
+		    && iabs(posX - tx) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= WALL_ANGLE_TOLERANCE) {
 			s->x = TO_FIXED(tx);
 			s->angle = (uint8_t)tileAngle;
 			s->collided = 1;
-			startX = tx;
+			*startX = tx;
 			return;
 		}
 	}
 }
 
-static void find_rwall(Sensor *s)
+static void find_lwall(Sensor *s)
 {
 	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t startX = posX;  /* carried across both layers, see find_floor */
+
+	find_lwall_layer(s, g_ghz_map, posX, posY, &startX);
+	find_lwall_layer(s, ghz_map_fgh, posX, posY, &startX);
+}
+
+/* One layer's worth of find_rwall's probe; see find_floor_layer's comment
+ * for why this is a real function called twice rather than a loop. */
+static void find_rwall_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                              int32_t posY, int32_t *startX)
+{
 	int32_t cx = (posX & -CELL_SIZE) + CELL_SIZE;
-	int32_t colX = posX;
-	int32_t startX = posX;
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cx -= CELL_SIZE) {
-		uint16_t cell = cell_at(cx, posY);
+		uint16_t cell = cell_at(map, cx, posY);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -214,16 +278,25 @@ static void find_rwall(Sensor *s)
 
 		tx = cx + mask;
 		tileAngle = row[OFF_ANGLE + 2];
-		if ((!s->collided || startX <= tx)
-		    && iabs(colX - tx) <= collisionTolerance
+		if ((!s->collided || *startX <= tx)
+		    && iabs(posX - tx) <= collisionTolerance
 		    && iabs((int32_t)s->angle - tileAngle) <= WALL_ANGLE_TOLERANCE) {
 			s->x = TO_FIXED(tx);
 			s->angle = (uint8_t)tileAngle;
 			s->collided = 1;
-			startX = tx;
+			*startX = tx;
 			return;
 		}
 	}
+}
+
+static void find_rwall(Sensor *s)
+{
+	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t startX = posX;  /* carried across both layers, see find_floor */
+
+	find_rwall_layer(s, g_ghz_map, posX, posY, &startX);
+	find_rwall_layer(s, ghz_map_fgh, posX, posY, &startX);
 }
 
 /* ---- air-collision finders -------------------------------------------
@@ -237,18 +310,50 @@ static void find_rwall(Sensor *s)
  *     continuation of the current slope;
  *   - the floor/roof checks use the fixed collisionMinimumDistance (14px,
  *     not collisionTolerance) and only look at the two cells nearest the
- *     sensor, taking the first solid one rather than comparing all three. */
+ *     sensor, taking the first solid one rather than comparing all three.
+ *
+ * These four scan both foreground layers too, same layer loop as the
+ * position finders above (Collision.cpp:2406, 2479, 2532, 2605, all reading
+ * "for (int32 l = 0, layerID = 1; l < LAYER_COUNT; ++l, layerID <<= 1) {"
+ * then "if (collisionEntity->collisionLayers & layerID) {"), but what
+ * carries across layers is not startY/startX:
+ *   - FloorCollision/RoofCollision carry a running best -- collidePos/
+ *     collideAngle, declared before the layer loop (2402-2403, 2528-2529)
+ *     and applied to the sensor once, after both layers, in the block below
+ *     the loop (2461-2469, 2590-2595). The accept test inside the loop is
+ *     not "is this candidate better than the last", it is "is the sensor
+ *     still on the near side of the last-recorded one": `colY < collidePos`
+ *     at 2434 (floor), `colY > collidePos` at 2563 (roof). colY is just
+ *     posY here (layer->position is always 0 in this port, so RSDK's
+ *     colY = posY - layer->position.y never differs from posY, same as
+ *     every finder above). Ported below as floor_collision_layer/
+ *     roof_collision_layer taking collidePos/collideAngle by pointer.
+ *   - LWallCollision/RWallCollision (2472-2511, 2598-2637) carry nothing at
+ *     all: they write straight to sensor->collided/angle/position.x with no
+ *     comparison, so a later layer's hit unconditionally overwrites an
+ *     earlier one's. lwall_collision_layer/rwall_collision_layer below
+ *     reproduce that directly -- no shared state passed between the two
+ *     calls, whichever finds a hit last wins, exactly like the original. */
 
-static void floor_collision(Sensor *s)
+/* One layer's worth of floor_collision's probe. collidePos/collideAngle are
+ * the running best, carried across both calls by pointer exactly like
+ * RSDK's collidePos/collideAngle are carried across its layer loop
+ * (Collision.cpp:2402-2403); accepting here means "the sensor is still above
+ * the last-recorded floor" (posY < *collidePos, transcribed from colY <
+ * collidePos at 2434), not "this candidate beats the last one". No Sensor
+ * parameter: unlike the position finders and the wall air-finders below,
+ * RSDK's FloorCollision never touches sensor-> inside the layer loop either
+ * -- only the running best, applied to the sensor once after both layers
+ * (see floor_collision). */
+static void floor_collision_layer(const uint16_t *map, int32_t posX,
+                                   int32_t posY, int32_t *collidePos,
+                                   int32_t *collideAngle)
 {
-	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
 	int32_t cy = (posY & -CELL_SIZE) - CELL_SIZE;
-	int32_t collidePos = 0x7FFFFFFF;
-	int32_t collideAngle = 0;
 	int32_t i;
 
 	for (i = 0; i < 2; i++, cy += CELL_SIZE) {
-		uint16_t cell = cell_at(posX, cy);
+		uint16_t cell = cell_at(map, posX, cy);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -259,10 +364,22 @@ static void floor_collision(Sensor *s)
 		mask = row[OFF_FLOOR + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
-		collideAngle = row[OFF_ANGLE + 0];
-		collidePos = cy + mask;
-		break;
+		if (posY < *collidePos) {
+			*collideAngle = row[OFF_ANGLE + 0];
+			*collidePos = cy + mask;
+			return;
+		}
 	}
+}
+
+static void floor_collision(Sensor *s)
+{
+	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t collidePos = 0x7FFFFFFF;
+	int32_t collideAngle = 0;
+
+	floor_collision_layer(g_ghz_map, posX, posY, &collidePos, &collideAngle);
+	floor_collision_layer(ghz_map_fgh, posX, posY, &collidePos, &collideAngle);
 
 	if (collidePos != 0x7FFFFFFF) {
 		int32_t collideDist = s->y - TO_FIXED(collidePos);
@@ -274,16 +391,21 @@ static void floor_collision(Sensor *s)
 	}
 }
 
-static void roof_collision(Sensor *s)
+/* One layer's worth of roof_collision's probe; mirror of
+ * floor_collision_layer (see its comment for why there is no Sensor
+ * parameter) with the comparison flipped (posY > *collidePos, transcribed
+ * from colY > collidePos at Collision.cpp:2563) and the running best
+ * starting at -1 instead of 0x7FFFFFFF, matching RSDK's own collidePos
+ * inits (2403 vs 2529). */
+static void roof_collision_layer(const uint16_t *map, int32_t posX,
+                                  int32_t posY, int32_t *collidePos,
+                                  int32_t *collideAngle)
 {
-	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
 	int32_t cy = (posY & -CELL_SIZE) + CELL_SIZE;
-	int32_t collidePos = -1;
-	int32_t collideAngle = 0;
 	int32_t i;
 
 	for (i = 0; i < 2; i++, cy -= CELL_SIZE) {
-		uint16_t cell = cell_at(posX, cy);
+		uint16_t cell = cell_at(map, posX, cy);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -294,10 +416,22 @@ static void roof_collision(Sensor *s)
 		mask = row[OFF_ROOF + (posX & 0xF)];
 		if (mask == 0xFF) continue;
 
-		collideAngle = row[OFF_ANGLE + 3];
-		collidePos = cy + mask;
-		break;
+		if (posY > *collidePos) {
+			*collideAngle = row[OFF_ANGLE + 3];
+			*collidePos = cy + mask;
+			return;
+		}
 	}
+}
+
+static void roof_collision(Sensor *s)
+{
+	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+	int32_t collidePos = -1;
+	int32_t collideAngle = 0;
+
+	roof_collision_layer(g_ghz_map, posX, posY, &collidePos, &collideAngle);
+	roof_collision_layer(ghz_map_fgh, posX, posY, &collidePos, &collideAngle);
 
 	if (collidePos >= 0 && s->y <= TO_FIXED(collidePos)
 	    && s->y - TO_FIXED(collidePos) >= -TO_FIXED(14)) {
@@ -307,14 +441,17 @@ static void roof_collision(Sensor *s)
 	}
 }
 
-static void lwall_collision(Sensor *s)
+/* One layer's worth of lwall_collision's probe. No shared state with the
+ * other call (see the block comment above): whichever call finds a hit last
+ * simply overwrites s, same as RSDK's LWallCollision. */
+static void lwall_collision_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                                   int32_t posY)
 {
-	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
 	int32_t cx = (posX & -CELL_SIZE) - CELL_SIZE;
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cx += CELL_SIZE) {
-		uint16_t cell = cell_at(cx, posY);
+		uint16_t cell = cell_at(map, cx, posY);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -336,14 +473,24 @@ static void lwall_collision(Sensor *s)
 	}
 }
 
-static void rwall_collision(Sensor *s)
+static void lwall_collision(Sensor *s)
 {
 	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+
+	lwall_collision_layer(s, g_ghz_map, posX, posY);
+	lwall_collision_layer(s, ghz_map_fgh, posX, posY);
+}
+
+/* One layer's worth of rwall_collision's probe; see lwall_collision_layer's
+ * comment. */
+static void rwall_collision_layer(Sensor *s, const uint16_t *map, int32_t posX,
+                                   int32_t posY)
+{
 	int32_t cx = (posX & -CELL_SIZE) + CELL_SIZE;
 	int32_t i;
 
 	for (i = 0; i < 3; i++, cx -= CELL_SIZE) {
-		uint16_t cell = cell_at(cx, posY);
+		uint16_t cell = cell_at(map, cx, posY);
 		uint16_t b;
 		const uint8_t *row;
 		uint8_t mask;
@@ -363,6 +510,14 @@ static void rwall_collision(Sensor *s)
 			return;
 		}
 	}
+}
+
+static void rwall_collision(Sensor *s)
+{
+	int32_t posX = FROM_FIXED(s->x), posY = FROM_FIXED(s->y);
+
+	rwall_collision_layer(s, g_ghz_map, posX, posY);
+	rwall_collision_layer(s, ghz_map_fgh, posX, posY);
 }
 
 /* ---- SetPathGripSensors -------------------------------------------------- */

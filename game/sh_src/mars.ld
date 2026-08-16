@@ -26,9 +26,24 @@ SEARCH_DIR(.)
  * +--------------------+ <- 0x0603FC00
  */
 
+/* rom is shrunk to the 68000's own 512 KB cartridge window on purpose: this
+ * SH2 program's .text/.data load image and the incbin'd 68000 program both
+ * have to fit ahead of maphigh below, and capping LENGTH here turns any
+ * overflow into a hard link error instead of it silently landing on top of
+ * maphigh's data. See maphigh's own comment for what lives there and why. */
 MEMORY {
-	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x00400000
+	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x00080000
 	ram (wx) : ORIGIN = 0x06000000, LENGTH = 0x0003FC00
+
+	/* FG High's map (assets/ghz/map_fgh.bin, sh_src/map_fgh.s), too big for
+	 * the 68000's own ROM window so it is linked here instead: cartridge
+	 * offset 0x80000, right after rom's 512 KB above. Both CPUs reach this
+	 * address with no bank switch -- the SH2s see it directly at this
+	 * ORIGIN, and the 68000 sees the same bytes at the fixed pointer
+	 * 0x980000 (md_src/main.c's ghz_map_fgh_md). This ORIGIN, that pointer
+	 * and map_fgh.s's AT() load address are a hand-synced trio: change one,
+	 * change all three. */
+	maphigh (r) : ORIGIN = 0x02080000, LENGTH = 0x00040000
 }
 
 PROVIDE (__stack = 0x0603FC00);
@@ -70,6 +85,17 @@ SECTIONS {
 		. = ALIGN(0x4);
 	} > rom
 	_stext = SIZEOF (.text);
+
+	/* map_fgh.bin, whole and unparsed -- see MEMORY's maphigh comment above.
+	 * AT(0x00080000) keeps its load address contiguous with .text's LMA
+	 * range (AT(0x00000000) above) in the flat .32x image, right after
+	 * rom's 512 KB, rather than defaulting to its VMA (which would blow the
+	 * image out to gigabytes of padding). KEEP: nothing else references
+	 * this section by name, so without it a garbage-collecting link could
+	 * drop it. */
+	.maphigh 0x02080000 : AT(0x00080000) {
+		KEEP(*(.maphigh))
+	} > maphigh
 
 	.data 0x06000000 : AT(LOADADDR(.text) + SIZEOF(.text)) {
 		*(.got.plt) *(.got)

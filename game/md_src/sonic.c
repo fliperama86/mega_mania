@@ -45,7 +45,17 @@ uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
 		list[i].y = 128 + sy + f->pivotY + p->dy;
 		list[i].size = p->size;
 		list[i].link = firstLink + i + 1;
-		list[i].attr = TILE_ATTR(SONIC_PAL, 1, 0, flip, vramTile + p->tile);
+		/* Low priority: FG Low (Plane A, always low) belongs behind Sonic and
+		 * FG High (Plane B, always high -- see main.c's draw_block_column/
+		 * row) belongs in front of him, matching Mania's FG High-above-player
+		 * stacking. That needs Sonic between the two, which the Genesis VDP's
+		 * fixed layer order only gives a low-priority sprite: back to front,
+		 * Plane B low, Plane A low, sprite low, Plane B high, Plane A high,
+		 * sprite high. High priority here would draw Sonic above FG High too
+		 * and defeat the stacking; before FG High existed this bit did
+		 * nothing observable, since it only had all-low Plane A to be above
+		 * either way. */
+		list[i].attr = TILE_ATTR(SONIC_PAL, 0, 0, flip, vramTile + p->tile);
 		list[i].x = 128 + sx + dx;
 	}
 	return f->pieceCount;

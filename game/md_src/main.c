@@ -41,6 +41,19 @@ extern const uint16_t ghz_bgmap[];
 #define MAP_SOLID_SIDES 0x2000
 #define TILE_BASE  TILE_USERINDEX
 
+/* FG High (loop fronts, overhangs): tools/convert_stage.py's map_fgh.bin,
+ * same cell format as ghz_map above, sharing its MAP_W/MAP_H (converter-
+ * asserted equal). At 262,144 B it cannot fit this program's own 512 KB ROM
+ * window the way ghz_map does, so it is linked only into the slave SH2's
+ * image (sh_src/map_fgh.s), at cartridge offset 0x80000. That offset falls
+ * in the 68000's banked window (0x900000-0x9FFFFF), which shows bank 0 --
+ * cartridge 0x000000-0x0FFFFF -- at 0xA15104's power-on value, and nothing
+ * in this codebase ever writes that register, so the fixed pointer below
+ * needs no bank switch to stay valid. This literal, sh_src/mars.ld's maphigh
+ * ORIGIN and sh_src/map_fgh.s's AT() are a hand-synced trio: change one,
+ * change all three. */
+static const uint16_t *const ghz_map_fgh_md = (const uint16_t *)0x980000;
+
 #define VIEW_BLOCKS_X 32        /* 64 cells */
 #define VIEW_BLOCKS_Y 16        /* 32 cells */
 
@@ -79,14 +92,33 @@ static void draw_block_column(uint16_t blockX)
 	for (i = 0; i < VIEW_BLOCKS_Y; i++) {
 		uint16_t by = firstRow + i;
 		/* bits 12-13 are collision flags, not part of the index */
-		uint16_t b  = (by < MAP_H)
-		            ? (ghz_map[by * MAP_W + blockX] & MAP_BLOCK_MASK) : 0;
-		const uint16_t *e = &ghz_blocks[b * 4];
+		uint16_t b = 0, bh = 0;
+		const uint16_t *e, *eh;
+
+		if (by < MAP_H) {
+			b  = ghz_map[by * MAP_W + blockX] & MAP_BLOCK_MASK;
+			bh = ghz_map_fgh_md[by * MAP_W + blockX] & MAP_BLOCK_MASK;
+		}
+		e  = &ghz_blocks[b * 4];
+		eh = &ghz_blocks[bh * 4];
 
 		colL[i * 2 + 0] = e[0] + TILE_BASE;
 		colR[i * 2 + 0] = e[1] + TILE_BASE;
 		colL[i * 2 + 1] = e[2] + TILE_BASE;
 		colR[i * 2 + 1] = e[3] + TILE_BASE;
+
+		/* FG High goes straight to Plane B here rather than through a second
+		 * buffer-then-write pass like Plane A above: high priority, so it
+		 * draws above Plane A and above low-priority sprites, which is FG
+		 * High's above-the-player stacking (see sonic.c's sonic_build(),
+		 * where Sonic's own sprite priority is set to match). */
+		{
+			uint16_t cellY = (by * 2) & (PLAN_HEIGHT - 1);
+			vdp_map_xy(VDP_PLAN_B, (eh[0] + TILE_BASE) | 0x8000, cellX,     cellY);
+			vdp_map_xy(VDP_PLAN_B, (eh[1] + TILE_BASE) | 0x8000, cellX + 1, cellY);
+			vdp_map_xy(VDP_PLAN_B, (eh[2] + TILE_BASE) | 0x8000, cellX,     cellY + 1);
+			vdp_map_xy(VDP_PLAN_B, (eh[3] + TILE_BASE) | 0x8000, cellX + 1, cellY + 1);
+		}
 	}
 
 	for (i = 0; i < VIEW_BLOCKS_Y; i++) {
@@ -111,14 +143,29 @@ static void draw_block_row(uint16_t blockY)
 
 	for (i = 0; i < VIEW_BLOCKS_X; i++) {
 		uint16_t bx = firstCol + i;
-		uint16_t b  = (bx < MAP_W)
-		            ? (ghz_map[blockY * MAP_W + bx] & MAP_BLOCK_MASK) : 0;
-		const uint16_t *e = &ghz_blocks[b * 4];
+		uint16_t b = 0, bh = 0;
+		const uint16_t *e, *eh;
+
+		if (bx < MAP_W) {
+			b  = ghz_map[blockY * MAP_W + bx] & MAP_BLOCK_MASK;
+			bh = ghz_map_fgh_md[blockY * MAP_W + bx] & MAP_BLOCK_MASK;
+		}
+		e  = &ghz_blocks[b * 4];
+		eh = &ghz_blocks[bh * 4];
 
 		rowT[i * 2 + 0] = e[0] + TILE_BASE;
 		rowT[i * 2 + 1] = e[1] + TILE_BASE;
 		rowB[i * 2 + 0] = e[2] + TILE_BASE;
 		rowB[i * 2 + 1] = e[3] + TILE_BASE;
+
+		/* FG High straight to Plane B; see draw_block_column's comment. */
+		{
+			uint16_t cx = (bx * 2) & (PLAN_WIDTH - 1);
+			vdp_map_xy(VDP_PLAN_B, (eh[0] + TILE_BASE) | 0x8000, cx,     cellY);
+			vdp_map_xy(VDP_PLAN_B, (eh[1] + TILE_BASE) | 0x8000, cx + 1, cellY);
+			vdp_map_xy(VDP_PLAN_B, (eh[2] + TILE_BASE) | 0x8000, cx,     cellY + 1);
+			vdp_map_xy(VDP_PLAN_B, (eh[3] + TILE_BASE) | 0x8000, cx + 1, cellY + 1);
+		}
 	}
 
 	for (i = 0; i < VIEW_BLOCKS_X; i++) {
@@ -135,30 +182,6 @@ static void draw_screen(void)
 	uint16_t base = camX >> 4;
 	uint16_t x;
 	for (x = 0; x < VIEW_BLOCKS_X; x++) draw_block_column(base + x);
-}
-
-/* The background now comes from the 32X framebuffer layer behind the Mega
- * Drive (see sh_src/m_main.c and docs/hardware-budget.md, section 3, "Layer
- * order: the MD draws in front"). Kept here, unused, as a record of what
- * Plane B used to hold. */
-__attribute__((unused))
-static void draw_background(void)
-{
-	uint16_t x, y;
-
-	for (x = 0; x < VIEW_BLOCKS_X; x++) {
-		for (y = 0; y < VIEW_BLOCKS_Y; y++) {
-			uint16_t by = BG_TOP_ROW + y;
-			uint16_t b  = (by < BGMAP_H)
-			            ? (ghz_bgmap[by * BGMAP_W + x] & MAP_BLOCK_MASK) : 0;
-			const uint16_t *e = &ghz_blocks[b * 4];
-
-			vdp_map_xy(VDP_PLAN_B, e[0] + TILE_BASE, x * 2,     y * 2);
-			vdp_map_xy(VDP_PLAN_B, e[1] + TILE_BASE, x * 2 + 1, y * 2);
-			vdp_map_xy(VDP_PLAN_B, e[2] + TILE_BASE, x * 2,     y * 2 + 1);
-			vdp_map_xy(VDP_PLAN_B, e[3] + TILE_BASE, x * 2 + 1, y * 2 + 1);
-		}
-	}
 }
 
 int main(void)
@@ -309,11 +332,15 @@ int main(void)
 		sonic_upload(frameIndex);
 		vdp_sprites_write(list, used);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
-		vdp_hscroll(VDP_PLAN_B, -(int16_t)(camX >> 1));
+		/* Plane B now carries FG High, streamed from the same firstCol/
+		 * firstRow window as Plane A's FG Low (draw_block_column/row above),
+		 * so it scrolls in lockstep with Plane A rather than the half-rate
+		 * parallax this used to be before the 32X framebuffer took over the
+		 * background layer (docs/hardware-budget.md, section 3, "Layer
+		 * order: the MD draws in front"). */
+		vdp_hscroll(VDP_PLAN_B, -(int16_t)camX);
 		vdp_vscroll(VDP_PLAN_A, (int16_t)camY);
-		/* Plane B stays put vertically (vscroll left at the 0 vdp_init() set
-		 * it to): the background has no vertical parallax yet, and it is
-		 * bottom-aligned for the horizon, so a fixed horizon is fine for now. */
+		vdp_vscroll(VDP_PLAN_B, (int16_t)camY);
 	}
 
 	return 0;

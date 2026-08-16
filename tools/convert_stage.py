@@ -12,17 +12,35 @@ Emits into <outdir>:
                  for that mirroring (quadrant swap plus per-entry hflip/vflip
                  XOR). Variants are appended after every base block, in the
                  order their (base block, flipX, flipY) combination is first
-                 encountered scanning FG then BG. Still one block index space,
-                 under the map cell's 12-bit budget (4095 blocks max).
+                 encountered scanning FG Low, then BG Outside, then FG High.
+                 Still one block index space, under the map cell's 12-bit
+                 budget (4095 blocks max).
     map_fg.bin   FG Low layout: u16 per cell, bits 0-11 block index (base or
                  flip variant -- the flip itself is baked into which block
-                 this is, not stored again here),
-                 bit 12 floor solid, bit 13 wall and roof solid (RSDK path A)
+                 this is, not stored again here), bits 12-15 the scene
+                 entry's full solidity nibble unmasked: bit 12 floor solid,
+                 bit 13 wall and roof solid (RSDK path A, tested explicitly
+                 by game/md_src/main.c:39-41's MAP_SOLID_FLOOR/MAP_SOLID_SIDES
+                 and game/sh_src/path.c:37-39's SOLID_FLOOR/SOLID_SIDES),
+                 bits 14-15 RSDK path B (carried through but not tested by
+                 anything yet -- see collide_rows.bin below). The block index
+                 mask (MAP_BLOCK_MASK, both files above) is 0x0FFF, so bits
+                 12-15 riding along unmasked cost nothing today.
+    map_fgh.bin  FG High layout (loop fronts, overhangs), same format and
+                 dimensions as map_fg.bin -- the runtime has no separate
+                 ghz_map_w/ghz_map_h for it, it reuses FG Low's published
+                 ones (game/md_src/descriptor.h's GHZ_MAP_W/GHZ_MAP_H
+                 comment), so this converter asserts the two layers' scene
+                 dimensions match before emitting either map.
     map_bg.bin   BG Outside layout, same format
     collide_rows.bin   each DISTINCT 70-byte collision row once (floor, left
                  wall, right wall and roof masks of 16 each, then the four
                  angles, the flag and a pad byte to keep the stride even),
-                 first-encounter order over blocks.bin's block order
+                 first-encounter order over blocks.bin's block order. Rows
+                 only ever encode RSDK path A (TileConfig path 0, see
+                 load_collision below) -- path B's bits 14-15 in the map
+                 files above have no matching row of their own yet; that is
+                 deferred until path B collision support lands.
     collide_index.bin  one big-endian u16 per block (base or flip variant,
                  same order as blocks.bin): the row number into
                  collide_rows.bin for that block. Many blocks share a row
@@ -73,6 +91,7 @@ NAMETABLE_VFLIP = 1 << 12
 
 FG_LAYER = "FG Low"
 BG_LAYER = "BG Outside"
+FGH_LAYER = "FG High"
 
 # The last hardware palette belongs to the player, so the stage gets three.
 # That costs some colour accuracy on rare tiles and is the only way a character
@@ -352,9 +371,22 @@ def main():
     if FG_LAYER not in layers:
         raise SystemExit(f"no {FG_LAYER}; have: " + ", ".join(layers))
 
-    # Fit palettes across foreground and background together, since they share
-    # one 64 colour CRAM between them.
-    wanted = [("fg", FG_LAYER), ("bg", BG_LAYER)]
+    if FGH_LAYER in layers:
+        # The runtime has no ghz_map_w/ghz_map_h of its own for FG High; it
+        # reuses FG Low's (descriptor.h's GHZ_MAP_W/GHZ_MAP_H comment), so a
+        # scene where the two layers disagree in size would silently
+        # under/over-read map_fgh.bin at runtime instead of failing here.
+        fg_layer, fgh_layer = layers[FG_LAYER], layers[FGH_LAYER]
+        if (fgh_layer.w, fgh_layer.h) != (fg_layer.w, fg_layer.h):
+            raise SystemExit(
+                f"{FGH_LAYER} is {fgh_layer.w}x{fgh_layer.h} but {FG_LAYER} is "
+                f"{fg_layer.w}x{fg_layer.h} -- the runtime publishes only one "
+                f"map_w/map_h pair and reuses it for both layers, so they "
+                f"must match")
+
+    # Fit palettes across foreground, background and FG High together, since
+    # they share one 64 colour CRAM between them.
+    wanted = [("fg", FG_LAYER), ("bg", BG_LAYER), ("fgh", FGH_LAYER)]
     usage = Counter()
     used = {}
     for tag, name in wanted:
@@ -445,8 +477,11 @@ def main():
 
     maps = {}
     for tag, layer in used.items():
-        w = min(mapw, layer.w) if tag == "fg" else layer.w
-        h = min(maph, layer.h) if tag == "fg" else layer.h
+        # FG High shares FG Low's mapW/mapH clamp -- the assert above already
+        # guarantees they're the same scene size, and the runtime reuses FG
+        # Low's published dimensions for FG High too.
+        w = min(mapw, layer.w) if tag in ("fg", "fgh") else layer.w
+        h = min(maph, layer.h) if tag in ("fg", "fgh") else layer.h
         data = bytearray()
         missing = 0
         for y in range(h):
@@ -465,9 +500,14 @@ def main():
                         flip_y = bool(e & ENTRY_FLIPY)
                         b = variant_block(base_b, flip_x, flip_y) \
                             if (flip_x or flip_y) else base_b
-                    # carry RSDK path A solidity: bit 12 floor, bit 13 sides.
-                    # Without it every decorative flower reads as ground.
-                    b |= e & 0x3000
+                    # Carry the scene entry's full solidity nibble (bits
+                    # 12-15), not just path A's bits 12-13: without bit 12/13
+                    # every decorative flower reads as ground, and bits 14-15
+                    # (path B) are inert today (MAP_BLOCK_MASK/BLOCK_MASK is
+                    # 0x0FFF and only bits 12-13 are tested -- game/md_src/
+                    # main.c:39-41, game/sh_src/path.c:37-39) but future-proof
+                    # to carry now rather than mask off and re-derive later.
+                    b |= e & 0xF000
                 data += struct.pack(">H", b)
         maps[tag] = (w, h, data, missing)
 

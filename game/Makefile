@@ -188,3 +188,8 @@ clean:
 RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin) $(wildcard ../assets/ghzbg/*.bin)
 $(RES): ;
 md_src/assets.o: $(RES)
+
+# map_fgh.bin is the one converted asset that isn't pulled in by assets.s
+# (see sh_src/map_fgh.s): it's linked into the SH2 program instead, so the
+# reassembly dependency belongs on that object file, not on assets.o.
+sh_src/map_fgh.o: ../assets/ghz/map_fgh.bin
