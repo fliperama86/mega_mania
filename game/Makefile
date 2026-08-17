@@ -185,7 +185,7 @@ clean:
 # The empty recipe matters: without it these .bin files would be treated as
 # buildable targets in their own right instead of being left alone as source
 # data, which has cost this project hours before.
-RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin) $(wildcard ../assets/ghzbg/*.bin)
+RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin) $(wildcard ../assets/ghzbg/*.bin) $(wildcard ../assets/ring/*.bin)
 $(RES): ;
 md_src/assets.o: $(RES)
 

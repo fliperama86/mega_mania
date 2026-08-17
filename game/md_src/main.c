@@ -19,6 +19,7 @@
 #include "comm.h"
 #include "audio.h"
 #include "cd.h"
+#include "rings.h"
 
 /* Track to loop once the disc is spinning; the disc image built alongside
  * this ROM by tools/make_disc.py is audio-only and starts at track 1. */
@@ -211,7 +212,7 @@ int main(void)
 	vdp_colors(0, ghz_pal, 48);
 	vdp_colors(48, sonic_pal, 16);
 	vdp_tiles_load(ghz_tiles, TILE_BASE, tileCount);
-	sonic_gfx_init(TILE_BASE + tileCount);
+	rings_init(sonic_gfx_init(TILE_BASE + tileCount));
 
 	/* CD bring-up is entirely 68000-local (only this CPU can reach the CD
 	 * hardware) and every wait inside it is bounded, so it can run here
@@ -245,8 +246,19 @@ int main(void)
 	for (;;) {
 		uint16_t pad = pad_read();
 		uint16_t wantCol, wantRow;
+		uint16_t sparkleCount;
 		uint16_t used;
-		static VDPSprite list[SONIC_MAX_PIECES];
+		uint16_t ringUsed;
+		uint16_t total;
+		/* Sparkles first, then Sonic's pieces, then ring sprites -- MD/32X
+		 * hardware sprite-vs-sprite overlap is table-order-only (rings.h's
+		 * rings_emit_sparkles() doc comment), and a sparkle has to draw
+		 * above Sonic, so it cannot come after him in this list. Sized off
+		 * SPARKLE_POOL_SIZE, SONIC_MAX_PIECES and the measured ring worst
+		 * case (32 rings live in any one camera window) with headroom;
+		 * their sum stays under the VDP's 80-sprite hardware table. Static,
+		 * not stack, like the list it replaces. */
+		static VDPSprite list[SPARKLE_POOL_SIZE + SONIC_MAX_PIECES + RING_SPRITE_CAP];
 
 		/* Right after pad_read(), before anything else, matching where the
 		 * single-CPU original called player_update: this is what keeps the
@@ -294,12 +306,33 @@ int main(void)
 			draw_block_column(firstCol);
 		}
 
-		/* Sonic lives in world space; sprites are screen space */
+		/* Sparkles are a pre-pass (rings.h's own doc comment): they must
+		 * land in list[] before Sonic's pieces, so this has to run before
+		 * sonic_build() rather than after it the way rings_update() does. */
+		sparkleCount = rings_emit_sparkles(list, 0, 0, camX, camY);
+
+		/* Sonic lives in world space; sprites are screen space. Writes at
+		 * list+sparkleCount (sonic_build() always fills its list argument
+		 * from its own element 0) with firstLink=sparkleCount, continuing
+		 * the chain: when a sparkle was written, rings_emit_sparkles()
+		 * already left list[sparkleCount-1].link == sparkleCount, pointing
+		 * at Sonic's first piece here; when sparkleCount is 0 this is
+		 * exactly the original sonic_build(..., list, 0) call, unchanged. */
 		used = sonic_build(frameIndex,
 		                   worldX - (int16_t)camX,
 		                   worldY - (int16_t)camY,
-		                   facing, drawGroupHigh, list, 0);
-		list[used - 1].link = 0;
+		                   facing, drawGroupHigh, &list[sparkleCount], sparkleCount);
+
+		/* Continues that same chain (list[sparkleCount+used-1].link already
+		 * reads `sparkleCount+used`, i.e. the array index right after
+		 * Sonic's pieces -- see sonic_build's formula); rings_update()
+		 * returns 0, leaving that link exactly as sonic_build set it,
+		 * whenever no ring is visible this frame. Terminating at the true
+		 * last entry here, once, covers every case. */
+		ringUsed = rings_update(list, sparkleCount + used, sparkleCount + used,
+		                        camX, camY, worldX, worldY, frameIndex);
+		total = sparkleCount + used + ringUsed;
+		list[total - 1].link = 0;
 
 		/* A frame counter next to the raw pad bits: on real hardware this is
 		 * what separates a hang from an input that never arrives. Plane A
@@ -316,9 +349,18 @@ int main(void)
 				/* CD digit: 0 none, 1 brought up, 2 music started.
 				 * The status word next to it is the drive's own:
 				 * 0100 is playing, 1000 no disc, 4000 tray open,
-				 * and bit 15 is the BIOS still busy. */
-				sprintf(buf, "%04X %02X CD%d %04X", frame++, pad,
-				        cdState, stat);
+				 * and bit 15 is the BIOS still busy. Ring count last:
+				 * "R OFF" if rings_init() refused to come up (tile
+				 * budget or table-count check, rings.h) instead of a
+				 * corrupted font or a mis-walked table being the first
+				 * sign of that. */
+				if (rings_enabled()) {
+					sprintf(buf, "%04X %02X CD%d %04X R%03u", frame++, pad,
+					        cdState, stat, rings_collected_count());
+				} else {
+					sprintf(buf, "%04X %02X CD%d %04X R OFF", frame++, pad,
+					        cdState, stat);
+				}
 			}
 			vdp_puts(VDP_PLAN_A, buf, 1, (camY >> 3) & (PLAN_HEIGHT - 1));
 		}
@@ -333,7 +375,7 @@ int main(void)
 		 * unless cd_init() brought one up. */
 		cd_vblank();
 		sonic_upload(frameIndex);
-		vdp_sprites_write(list, used);
+		vdp_sprites_write(list, total);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
 		/* Plane B now carries FG High, streamed from the same firstCol/
 		 * firstRow window as Plane A's FG Low (draw_block_column/row above),

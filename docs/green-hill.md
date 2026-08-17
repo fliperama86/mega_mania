@@ -52,6 +52,21 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
       original carries. The palette scare evaporated: refitting with FG High
       included left pal.bin byte-identical, 213 of its 240 tiles fit exactly,
       27 remap. 60 VPS in ares with the doubled plane streaming
+- [x] **Rings.** GHZ1's 445 Mania-mode Ring entities (`tools/convert_rings.py`,
+      the scene's Mania-filter-and-sort pass, same filter rule PlaneSwitch's
+      converter uses), drawn from a dedicated tile sheet
+      (`tools/convert_ring.py`, Ring.bin + Items.gif -> `assets/ring/`, the
+      >8 rotation-frame flip prebaked into the tiles, sharing FG High's
+      CRAM line with a worst per-channel error of 1 MD step) and entirely
+      68000-side: `game/md_src/rings.c` scans an x-sorted sliding window
+      against the camera, runs RSDKv5's own touch test
+      (`CheckObjectCollisionTouch`) against Sonic's per-frame hitbox
+      (a new `assets/sonic/hitbox.bin`, additive to `convert_sonic.py`),
+      and keeps the collected bitfield, ring counter and a small sparkle
+      pool. The slave SH2 never learns rings exist -- no descriptor entry,
+      no comm register spent. Sonic's pieces, ring sprites and sparkles
+      share one static hardware-sprite list, linked in that draw order, comfortably
+      under the VDP's 80-sprite table
 - [x] **Collision path B, PlaneSwitch and ForceSpin -- loops and S-tunnels are
       traversable, not merely drawn.** TileConfig's second path is now parsed
       alongside the first (`tools/convert_stage.py`, 179 unique rows for GHZ
@@ -88,9 +103,22 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 
 ## Known gaps, not yet scheduled
 
-- Objects of any kind: rings, springs, badniks, the goal. Out of scope by
-  decision, and the thing that separates "a zone that runs" from "a zone you
-  play"
+- Springs, badniks, the goal -- rings are done (see above), the rest of
+  GHZ1's objects are not. Still the thing that separates "a zone that runs"
+  from "a zone you play"
+- Ring sound. The original plays `Global/Ring.wav` with alternating left/
+  right pan (`Player_GiveRings`, Player.c) on every collect; this port has no
+  SFX system at all yet, so collecting is silent
+- The 100-rings extra life (`Player_GiveRings`' `ringExtraLife` check,
+  Player.c:928-934) is skipped -- there is no lives system to grant into
+- Real HUD. The ring count only exists in the debug overlay text
+  (`main.c`), not as in-game UI
+- Authority seam: ring state (the collected bitfield, counter, sparkle pool)
+  lives entirely on the 68000 because nothing else currently needs to know
+  about rings. If damage-triggered ring scatter is ever built, the slave SH2
+  (which owns collision and the player) would need to originate that event,
+  which likely means ring state has to move to the SH2 side instead -- worth
+  deciding before, not after, that feature starts
 - Act 2. Its FG Low is 1280x96 blocks, wider still than Act 1
 - The palette budget held after all: FG High fit into the three stage
   palettes with pal.bin unchanged. Act 2 will re-ask the question
