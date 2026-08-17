@@ -15,7 +15,11 @@
 		.ascii	"(C)FLIPERAMA    "
 		.ascii	"MEGA MANIA                                      "
 		.ascii	"MEGA MANIA                                      "
-		.ascii	"GM MEGAMANIA-00 "
+	/* Serial is 14 bytes (0x180-0x18D); 0x18E-0x18F is the MD header
+	 * CHECKSUM field, which the 32X master boot ROM treats as "verify the
+	 * cartridge" when nonzero. Keep it zero. */
+		.ascii	"GM MEGAMANIA-0"
+		.word	0x0000
 	/* Device support field. The C is what makes this a Mega CD program:
 	 * ares reads this field at ROM offset 0x190 (mia/medium/mega-32x.cpp)
 	 * and only then attaches the CD hardware and switches the system to

@@ -26,6 +26,7 @@ mania_dir=${MANIA_DIR:-$HOME/Projects/references/Sonic-Mania-Decompilation}
 
 target=game
 build=1
+mute=
 disc=${MEGAMANIA_DISC:-$root/assets/disc/disc.cue}
 
 while [ $# -gt 0 ]; do
@@ -34,7 +35,8 @@ while [ $# -gt 0 ]; do
 	--no-build) build=0 ;;
 	--no-disc) disc= ;;
 	--disc) disc=$2; shift ;;
-	*) echo "usage: tools/run.sh [game|cdbench|blitbench|mania] [--no-build] [--no-disc] [--disc PATH]" >&2; exit 2 ;;
+	--mute) mute="--setting Audio/Mute=true" ;;
+	*) echo "usage: tools/run.sh [game|cdbench|blitbench|mania] [--no-build] [--no-disc] [--disc PATH] [--mute]" >&2; exit 2 ;;
 	esac
 	shift
 done
@@ -96,7 +98,7 @@ fi
 echo "rom  $rom"
 if [ -n "$disc" ] && [ -f "$disc" ]; then
 	echo "disc $disc"
-	exec "$ares" --system "Mega 32X" --no-file-prompt "$rom" "$disc"
+	exec "$ares" --system "Mega 32X" --no-file-prompt $mute "$rom" "$disc"
 fi
 
 if [ -n "$disc" ]; then
@@ -104,4 +106,4 @@ if [ -n "$disc" ]; then
 else
 	echo "disc none"
 fi
-exec "$ares" --system "Mega 32X" --no-file-prompt "$rom"
+exec "$ares" --system "Mega 32X" --no-file-prompt $mute "$rom"

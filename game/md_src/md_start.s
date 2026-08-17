@@ -120,12 +120,45 @@ _start:
 
 		move.b	#0,(0xA15107)			/* clear RV - allow SH2 to access ROM */
 
+	/* Wait for both SH2 boot ROMs to report in -- with a timeout and a
+	 * reset-pulse retry instead of the traditional bare spin. An SH2 that
+	 * samples the adapter-control register before ADEN reads back as set
+	 * parks itself in its boot ROM (sleep + branch-to-self) and its wake
+	 * path is not reliable in ares, where cartridge-content timing decides
+	 * whether the slave wins or loses that race on any given build (an
+	 * otherwise-identical image can flip between booting and a black
+	 * screen by moving 0x40 bytes of content). Pulsing nRES low with ADEN
+	 * held re-runs both boot ROMs with the adapter visibly enabled, which
+	 * cannot lose the race. On a boot that comes up normally the timeout
+	 * never expires and this is exactly the old spin. */
 	0:
-		cmp.l	#0x4D5F4F4B,(0xA15120)	/* wait for "M_OK" in COMM0 (master SH2) */
-		bne.s	0b
+		move.l	#0x8000,d1				/* patience per attempt, ~0.2 s */
 	1:
-		cmp.l	#0x535F4F4B,(0xA15124)	/* wait for "S_OK" in COMM4 (slave SH2) */
+		cmp.l	#0x4D5F4F4B,(0xA15120)	/* "M_OK" in COMM0 (master SH2) */
+		bne.s	2f
+		cmp.l	#0x535F4F4B,(0xA15124)	/* "S_OK" in COMM4 (slave SH2) */
+		beq.s	3f
+	2:
+		subq.l	#1,d1
 		bne.s	1b
+		/* Hold the reset FIRST, then clear the stale handshake words. The
+		 * order matters twice over: clearing COMM0 while the old master
+		 * still runs lets it fall through its own "wait for the 68000"
+		 * spin and charge into init mid-pulse; and a leftover "M_OK" is
+		 * the slave boot ROM's "SDRAM is ready" gate, so a stale one lets
+		 * the reborn slave jump into SDRAM while the reborn master is
+		 * still wiping it. With both SH2s held in reset, neither race
+		 * exists. */
+		move.w	#0x0001,(0xA15100)		/* ADEN=1, nRES=0: hold both SH2s */
+		move.l	#0,(0xA15120)			/* clear COMM0+COMM2 */
+		move.l	#0,(0xA15124)			/* clear COMM4+COMM6 */
+		moveq	#100,d1
+	4:
+		subq.l	#1,d1					/* let the reset settle */
+		bne.s	4b
+		move.w	#0x0003,(0xA15100)		/* ADEN=1, nRES=1: release */
+		bra.s	0b
+	3:
 
 		move.w	(0xA15100),d0
 		or.w	#0x8000,d0
