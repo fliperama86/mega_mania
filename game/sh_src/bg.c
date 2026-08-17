@@ -192,6 +192,58 @@
 #define REBASE_CAP      40
 #define ROW_DIRTY_BASE  (SLACK + 1)   /* always outranks any horizontal delta (clamped to SLACK) */
 
+/* GHZ Act 1's water/waterfall palette shimmer. SonicMania/Objects/GHZ/
+ * GHZSetup.c:16-27 (GHZSetup_StaticUpdate, the decompilation):
+ *     GHZSetup->paletteTimer += 42;
+ *     if (GHZSetup->paletteTimer >= 0x100) {
+ *         GHZSetup->paletteTimer -= 0x100;
+ *         RSDK.RotatePalette(1, 181, 184, true);
+ *         RSDK.RotatePalette(2, 181, 184, true);
+ *         RSDK.RotatePalette(1, 197, 200, true);
+ *         RSDK.RotatePalette(2, 197, 200, true);
+ *     }
+ *     RSDK.SetLimitedFade(0, 1, 2, GHZSetup->paletteTimer, 181, 184);
+ *     RSDK.SetLimitedFade(0, 1, 2, GHZSetup->paletteTimer, 197, 200);
+ * Two 4-entry bands, indices 181-184 and 197-200 inclusive, both rotated
+ * "right" (see below) every time an accumulator stepped by 42/frame crosses
+ * 256 -- 256/42 = 6.095 frames average at 60 Hz, i.e. roughly every sixth
+ * frame, not a fixed period (the decomp's own comment in this file already
+ * flagged this spot as "would hook in here"). Banks 1 and 2 both get the
+ * hard rotation; SetLimitedFade then cross-fades bank 0->(1 or 2) using
+ * paletteTimer as a sub-frame blend amount, so the PC original never
+ * actually shows a hard step -- see the FIDELITY COMPROMISE note below.
+ *
+ * "true" (right) per RSDKv5's own RotatePalette (dependencies/RSDKv5/
+ * RSDKv5/RSDK/Graphics/Palette.hpp:93-105):
+ *     if (right) {
+ *         uint16 startClr = fullPalette[bankID][endIndex];
+ *         for (i = endIndex; i > startIndex; --i) fullPalette[i] = fullPalette[i - 1];
+ *         fullPalette[startIndex] = startClr;
+ *     }
+ * i.e. the colour at endIndex moves to startIndex, and every other entry in
+ * the range shifts UP one index (toward endIndex) -- rotate_water_band()
+ * below reproduces this exactly on a local 0-based copy (start=0,
+ * end=len-1).
+ *
+ * FIDELITY COMPROMISE (reported, not silently decided): SetLimitedFade's
+ * sub-frame cross-fade is not reproduced. The port only performs the hard
+ * step every ~6 frames; the original interpolates between steps every
+ * single frame (60 Hz), so its shimmer is visually smoother. Reproducing
+ * that would need a second colour buffer and a blend computed every
+ * bg_frame() call purely for 8 CRAM entries, which was judged not worth the
+ * per-frame cost for a background detail -- flagged here per the task's
+ * "any fidelity compromise gets reported" rule, not implemented.
+ *
+ * Also checked: no other palette-animation logic anywhere in GHZSetup.c,
+ * and no underwater/GHZ-water-physics object exists for Act 1 (only
+ * WaterfallSound.c, audio-only) -- confirming this is the only water-related
+ * palette logic Act 1 has, exactly as the task expected. */
+#define WATER_A_START   181
+#define WATER_B_START   197
+#define WATER_BAND_LEN  4
+#define GHZ_PALETTE_STEP    42
+#define GHZ_PALETTE_PERIOD  256
+
 /* bg_lines.bin's on-disk layout: struct.pack(">HH", parallax, speed) per
  * row, which lines up byte-for-byte with this (both CPUs in this build are
  * big endian: -mb for the SH2, natural for the 68000, so no swap needed). */
@@ -313,6 +365,20 @@ static uint16_t line_offset(int row, uint16_t camX)
  * queue), so a second independent reader here is exactly as safe as this
  * file already reading COMM6/COMM2, both nominally "for" the slave. */
 static uint8_t g_driftTick;
+
+/* Local copy of the 8 rotating water/waterfall CRAM entries (the two
+ * WATER_BAND_LEN-4 bands above), seeded from g_bg_pal at bg_init() and
+ * rotated in place every GHZ_PALETTE_PERIOD ticks -- never read back from
+ * CRAM (a write-only 32X CRAM readback would also just be this same data,
+ * one frame stale). g_paletteTimer is GHZSetup->paletteTimer's own Q8-ish
+ * accumulator, advanced by GHZ_PALETTE_STEP per 68000 tick (g_driftTick's
+ * tickDelta, the same clock discipline driftAccum[] uses above -- NOT once
+ * per bg_frame() call, which could run faster or slower than one real
+ * display frame under an unsynchronized SH2 loop, see g_driftTick's own
+ * comment). */
+static uint16_t waterA[WATER_BAND_LEN];
+static uint16_t waterB[WATER_BAND_LEN];
+static uint16_t g_paletteTimer;
 
 /* RSDKv5's layer-level Y scroll -- see the BG_LAYER_SCROLL_POS/
  * BG_LAYER_PARALLAX_Q8 comment above for the formula this reduces from.
@@ -554,6 +620,57 @@ void bg_assets_init(void)
 	g_bg_lines  = (const BgLine   *)md_addr_to_sh2(desc->bg_lines);
 }
 
+/* RSDKv5's RotatePalette(bank, start, end, right=true), generalised to a
+ * 0-based local array of length `len` (start=0, end=len-1) -- see the
+ * WATER_A_START comment above for the quoted source this mirrors line for
+ * line. Called on the two local copies, never on CRAM directly, so a period
+ * costs one array shuffle plus one small CRAM write burst
+ * (write_water_cram() below), not 8 individual read-modify-writes. */
+static void rotate_water_band(uint16_t *band)
+{
+	uint16_t last = band[WATER_BAND_LEN - 1];
+	int i;
+
+	for (i = WATER_BAND_LEN - 1; i > 0; i--) band[i] = band[i - 1];
+	band[0] = last;
+}
+
+/* Pushes the two rotated bands out to CRAM. 32X hardware: FBCTL's (mars.h's
+ * MARS_VDP_FBCTL, 0x2000410A -- the same register Hw32xInit/Hw32xScreenFlip
+ * already read for the FS bit above) PEN bit is "Palette register write
+ * permitted" -- 0 while the VDP is actively scanning CRAM out to the
+ * display, 1 during every HBlank and VBlank -- so a CRAM write issued while
+ * PEN is 0 races the display's own CRAM read and can show as a corrupted
+ * pixel on that scanline. bg_init()'s one-time 256-entry load never needed
+ * this: it runs before Hw32xInit's first Hw32xScreenFlip ever shows real
+ * framebuffer content (mars.c Hw32xInit clears both banks first), so there
+ * is no live scan to race. This write happens roughly every 6th frame of
+ * ordinary gameplay display, so it does need the guard. HBlank recurs every
+ * scanline (~63.6us at 224 lines/60Hz), so the wait below is bounded to a
+ * fraction of one scanline in the worst case, never an unbounded stall --
+ * no existing blitbench/mars.c CRAM write in this codebase gates on PEN
+ * today (Hw32xSetFGColor/Hw32xSetBGColor, mars.c, are only ever called
+ * during setup, same before-first-flip situation as bg_init()'s load), so
+ * this is new, not a precedent this file is only copying.
+ *
+ * MUST read FBCTL, not DISPMODE (0x20004100): an earlier version of this
+ * guard checked DISPMODE and hung the master SH2's whole loop forever under
+ * ares (confirmed by a two-screenshot check showing zero drift anywhere on
+ * screen, not just the water bands -- bg_frame() never returned to call
+ * Hw32xScreenFlip again) -- DISPMODE is the mode-select register
+ * (224-line/256-colour bits, write-mostly), it does not mirror FBCTL's
+ * status bits. */
+static void write_water_cram(volatile uint16_t *pal)
+{
+	int i;
+
+	while (!(MARS_VDP_FBCTL & MARS_VDP_PEN)) {}
+	for (i = 0; i < WATER_BAND_LEN; i++) {
+		pal[WATER_A_START + i] = waterA[i];
+		pal[WATER_B_START + i] = waterB[i];
+	}
+}
+
 void bg_init(void)
 {
 	volatile uint16_t *pal = &MARS_CRAM;
@@ -564,6 +681,16 @@ void bg_init(void)
 	 * own report), but load all 256 as asked: cheap, and avoids leaving
 	 * stray CRAM entries from whatever ran before this. */
 	for (i = 0; i < 256; i++) pal[i] = g_bg_pal[i];
+
+	/* Seed the rotating water/waterfall bands from the descriptor, not from
+	 * CRAM (see waterA[]/waterB[]'s comment): g_bg_pal's indices are Mania's
+	 * own, so g_bg_pal[181..184]/[197..200] are exactly the unrotated colours
+	 * the loop above just wrote into those same CRAM slots. */
+	for (i = 0; i < WATER_BAND_LEN; i++) {
+		waterA[i] = g_bg_pal[WATER_A_START + i];
+		waterB[i] = g_bg_pal[WATER_B_START + i];
+	}
+	g_paletteTimer = 0;
 
 	/* All LAYER_H_PX rows now, not just the 224 a fixed row-per-line
 	 * mapping used to limit this to: which rows are reachable moves with
@@ -880,8 +1007,20 @@ void bg_frame(void)
 		table[l] = (uint16_t)(lineWordBase[l] + (d >> 1));
 	}
 
-	/* Palette shimmer (four CRAM entries rotated roughly every six
-	 * frames in the original) would hook in here: a frame counter plus
-	 * a CRAM write every ~6 frames, same shape as the driftAccum update
-	 * above. Not implemented this pass -- see the file header. */
+	/* Water/waterfall palette shimmer -- GHZSetup.c:16-24 (see the
+	 * WATER_A_START comment above). Same clock discipline as driftAccum[]:
+	 * advanced by tickDelta (real 68000 vblanks elapsed), not once per call.
+	 * tickDelta is 0 most calls (this loop racing ahead of COMM_TICK), so
+	 * most calls add nothing; GHZ_PALETTE_STEP*tickDelta stays well under
+	 * GHZ_PALETTE_PERIOD for any tickDelta this file's own comment considers
+	 * realistic (>1 only if this CPU ever fell behind by whole frames), so a
+	 * plain "if" -- matching the decomp's own single "if", not a "while" --
+	 * never misses a crossing in practice. */
+	g_paletteTimer = (uint16_t)(g_paletteTimer + GHZ_PALETTE_STEP * tickDelta);
+	if (g_paletteTimer >= GHZ_PALETTE_PERIOD) {
+		g_paletteTimer -= GHZ_PALETTE_PERIOD;
+		rotate_water_band(waterA);
+		rotate_water_band(waterB);
+		write_water_cram(&MARS_CRAM);
+	}
 }

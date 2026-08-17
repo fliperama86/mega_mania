@@ -114,6 +114,26 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
       rotate, matching the original's own per-animation rotation style.
       113 KB of rotated tiles, comfortably under the budget `sh_src/mars.ld`
       carves out of the SH2's own ROM region for them
+- [x] **BG water/waterfall shimmer.** GHZSetup.c's palette cycle
+      (`GHZSetup_StaticUpdate`: two 4-entry CRAM bands, indices 181-184 and
+      197-200, rotated "right" every time a 42-per-tick accumulator crosses
+      256, ~every 6 frames) now runs on the master SH2 (`sh_src/bg.c`): a
+      local copy of the 8 entries, seeded from the descriptor at `bg_init()`
+      and rotated/rewritten to CRAM on the same tick-scaled clock
+      `driftAccum[]` already uses, not once per `bg_frame()` call. CRAM
+      writes gate on FBCTL's PEN bit (mars.h) -- discovered the hard way,
+      the first attempt gated on the wrong register (DISPMODE) and hung the
+      whole master loop. Compromise: the original's per-frame
+      `SetLimitedFade` cross-fade between steps isn't reproduced, only the
+      hard ~6-frame step -- smoother on PC, a visible but small step here.
+      Foreground half investigated, not implemented: of the two RSDK bands,
+      only 181-184 is actually painted onto any FG/BG/FGH tile (197-200 is
+      apparently object-only, unused by GHZ1's tile art), and 3 of those 4
+      colours already share their quantized MD slot with real, well-used
+      non-water tiles (up to 38 kept tiles). Giving the water colours their
+      own dedicated MD slots would need `tools/convert_stage.py` changes
+      that either blow the 15-colour-per-palette budget or bump other tiles
+      into the remap fallback -- not attempted per the stop-and-report rule
 
 ## Next
 

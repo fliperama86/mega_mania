@@ -21,6 +21,9 @@
 #include "cd.h"
 #include "rings.h"
 
+/* 1: draw the top-row debug text (frame counter, pad, CD state, rings). */
+#define DEBUG_OVERLAY 0
+
 /* Track to loop once the disc is spinning; the disc image built alongside
  * this ROM by tools/make_disc.py is audio-only and starts at track 1. */
 #define CD_MUSIC_TRACK 2
@@ -221,6 +224,9 @@ int main(void)
 	 * hardware, a bare 32X with no CD unit, this returns promptly. */
 	cdPresent = cd_init();
 	if (cdPresent) cdState = cd_music_play(CD_MUSIC_TRACK) ? 2 : 1;
+#if !DEBUG_OVERLAY
+	(void)frame; (void)cdState;   /* only the debug overlay reads these */
+#endif
 
 	/* Player/Camera now live only on the slave SH2, so the descriptor table
 	 * and screenCenterY (SCREEN_HALF_H is only valid after vdp_init()) are
@@ -335,7 +341,13 @@ int main(void)
 		total = sparkleCount + used + ringUsed;
 		list[total - 1].link = 0;
 
-		/* A frame counter next to the raw pad bits: on real hardware this is
+		/* Debug overlay, compile-time gated (user asked for a clean screen once
+	 * rings proved out). Re-enable for bring-up work -- on real hardware
+	 * this row is what separates a hang from an input that never arrives,
+	 * and the ring counter is the only collect feedback until a real HUD
+	 * exists. */
+#if DEBUG_OVERLAY
+	/* A frame counter next to the raw pad bits: on real hardware this is
 		 * what separates a hang from an input that never arrives. Plane A
 		 * scrolls under it, so it goes on whichever cell row the top of the
 		 * screen currently lands on rather than on plane row 0. */
@@ -365,6 +377,8 @@ int main(void)
 			}
 			vdp_puts(VDP_PLAN_A, buf, 1, (camY >> 3) & (PLAN_HEIGHT - 1));
 		}
+
+#endif
 
 		/* vdp_wait_vblank, not vdp_vsync: the latter returns once vblank has
 		 * ended, which would put the tile DMA in active display where the VDP
