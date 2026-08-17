@@ -210,7 +210,15 @@ def main():
     f4 = a4.frames[:max4]
 
     # frame -> (flip, section) for the render pass below
-    jobs = [(f, fi >= FLIP_FROM_FRAME, "anim0") for fi, f in enumerate(f0)]
+    # DELIBERATE DEVIATION (user's call, 2026-08-17): Ring_Draw_Normal's
+    # frameID > 8 flip exists to keep the highlight on the same side (the
+    # sheet draws the turn's second half lit from the right, and the flip
+    # normalises the lighting) -- baked faithfully, frames 9-15 come out
+    # near-identical to 0-7 and a 16 px ring reads as swinging shut and
+    # open rather than spinning. Playing the sheet's raw art instead lets
+    # the highlight travel around the band, which reads as rotation.
+    # Restore `fi >= FLIP_FROM_FRAME` for Mania's exact draw.
+    jobs = [(f, False, "anim0") for fi, f in enumerate(f0)]
     jobs += [(f, False, "sparkle1") for f in f2]
     jobs += [(f, False, "sparkle3") for f in f4]
 
