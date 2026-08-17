@@ -63,7 +63,10 @@
  *    camera parked is a requirement, not a bug). Measured against the
  *    shipped asset this settles to ~2-3 strip draws/frame on average once
  *    the camera stops, against a constant 56 every frame, moving or not,
- *    before this change. Worst case (fast camera on both axes at once) is
+ *    before this change -- plus, since sub-word drift phasing (linePhase[]
+ *    below) landed, ~12 selections/frame of parked-camera phase redraws
+ *    for the two sub-pixel cloud bands, byte-copied, still nowhere near
+ *    the cap. Worst case (fast camera on both axes at once) is
  *    a flat 80/frame, capped and stable -- see the constants below for the
  *    worst-case math, and layer_first_row()'s comment for the vertical
  *    case specifically, which looks like it should be able to fall behind
@@ -72,6 +75,7 @@
 #include "mars.h"
 #include "assets.h"
 #include "bg.h"
+#include "comm.h"
 
 /* Data starts after the 256-word line table, the same FB_DATA_WORD
  * convention the placeholder gradient used. Layout from there: one
@@ -206,6 +210,7 @@ static const BgLine   *g_bg_lines;    /* one parallax/speed pair per background 
 static uint16_t parallaxQ8[LAYER_H_PX];    /* Q8, 256 = 1.0 */
 static uint16_t speedQ8[LAYER_H_PX];       /* Q8 px/frame */
 static uint32_t driftAccum[LAYER_H_PX];    /* Q8.8 px, wraps mod map width */
+static uint8_t  rowSubPx[LAYER_H_PX];      /* row drifts at under 1 px/frame -- see linePhase[] */
 static uint8_t  rowFlat[LAYER_H_PX];       /* 1 if this row is one block, one colour */
 static uint8_t  rowFlatSlot[LAYER_H_PX];   /* which flatColourVal[], valid only if rowFlat[row] */
 
@@ -228,6 +233,25 @@ static uint8_t  lineFlatSlot[SCREEN_HEIGHT]; /* valid only if lineFlat[l] */
 static uint16_t lineWordBase[SCREEN_HEIGHT]; /* the table word this line writes when not being rebased */
 static uint8_t  framesDirty[SCREEN_HEIGHT];  /* saturates at 255; only used to rank priority */
 
+/* Sub-word drift phase. The line table addresses the framebuffer in WORDS
+ * -- two 8bpp pixels -- so (d >> 1) alone quantises every line's position
+ * to 2 px. For rows that move only with the camera that is invisible in
+ * motion and static at rest, but a row that DRIFTS at under 1 px/frame
+ * turns it into a visible lurch: the 0.25 px/frame cloud band steps 2 px
+ * once every 8 frames, a 7.5 Hz stutter (the original steps 1 px at 15 Hz
+ * -- RSDK truncates to whole pixels too, but to 1, not 2). The odd pixel
+ * cannot live in the table, so it lives in the CONTENT: linePhase[l] is
+ * the pixel-parity its strip was last DRAWN with (strip byte 0 = background
+ * pixel bgBase+linePhase), and the table write subtracts it back out --
+ * effective granularity 1 px, at the price of a strip redraw whenever a
+ * sub-pixel row's parity flips. Scoped to rowSubPx[] rows only (speeds
+ * strictly under 1 px/frame: the two far cloud bands, 32 lines): the
+ * 1 px/frame band already steps its 2 px at 30 Hz, which reads as smooth,
+ * and phasing it would cost 64 redraws every frame. Redraw scheduling and
+ * budget are the ordinary candidate pool below -- see bg_frame(). */
+static uint8_t  linePhase[SCREEN_HEIGHT];
+static uint16_t prevCamX;   /* last frame's camX: gates phase-only redraws to a parked camera */
+
 /* Lines rebased THIS real frame still need their base redrawn into the
  * OTHER physical bank next real frame before both banks agree -- see the
  * pendingLines comment in bg_frame(). */
@@ -239,12 +263,50 @@ static uint8_t pendingCount;
  * camera's contribution scaled by that row's parallax factor, both in the
  * same px domain, wrapped into the map's width. Shared by the per-frame
  * line-table pass and the rebase pass so the two always agree on what
- * "current" means for a given row. */
+ * "current" means for a given row.
+ *
+ * Sums BEFORE truncating, matching Scene.cpp's own ProcessParallax
+ * (LAYER_HSCROLL case, RSDK/Scene/Scene.cpp:1048-1054):
+ *     scrollInfo->tilePos = scrollInfo->scrollPos
+ *                          + (currentScreen->position.x * scrollInfo->parallaxFactor << 8);
+ *     int16 tilePos = FROM_FIXED(scrollInfo->tilePos) % pixelWidth;
+ * scrollPos and the camX*parallaxFactor term are both accumulated in the
+ * SAME fixed-point domain (16.16 there, Q8.8 here -- driftAccum is Q8.8,
+ * and camX*parallaxQ8 is camX's whole pixels times a Q8 factor, i.e. also
+ * Q8.8) and only truncated once, together, via FROM_FIXED there / >>8
+ * here. Truncating driftAccum and the camera term separately (as this
+ * used to) discards the camera term's own fraction a frame early; with a
+ * moving camera that is a real (if small, <=1px) per-row bias, not just
+ * cosmetic imprecision, so it is fixed even though it happens to be a
+ * no-op while the camera sits still. */
 static uint16_t line_offset(int row, uint16_t camX)
 {
-	uint32_t v = (driftAccum[row] >> 8) + (((uint32_t)camX * parallaxQ8[row]) >> 8);
+	uint32_t v = (driftAccum[row] + (uint32_t)camX * parallaxQ8[row]) >> 8;
 	return (uint16_t)(v & (MAP_W_PX - 1));
 }
+
+/* The 68000's own vblank tick (comm.h's COMM_TICK, bits [15:8]): the same
+ * counter s_main.c's comm_wait_tick() gates every player_update/camera step
+ * on, specifically so the slave runs "exactly one update per real 60 Hz
+ * vblank instead of running as fast as the SH2's loop can spin" (comm.h's
+ * own words for exactly this problem). This CPU's loop (m_main.c) has no
+ * equivalent gate -- it only waits on Hw32xScreenFlip's own FBCTL bank-select
+ * readback, a different piece of hardware than the 68000 vblank COMM_TICK
+ * counts. On real 32X hardware the two are genlocked and this never matters;
+ * under ares the two clock domains are not guaranteed to stay in lockstep
+ * call-for-call, so bg_frame() could run driftAccum's update faster (or
+ * slower) than one real display frame -- the "too fast and inconsistent"
+ * cloud drift this file was asked to fix: same bug shape comm_wait_tick
+ * already exists to prevent, just never applied to this CPU's own loop.
+ *
+ * g_driftTick scales driftAccum's per-call step by however many real 68000
+ * ticks actually elapsed since the last bg_frame() call (0 most of the time
+ * this races ahead of COMM_TICK, occasionally >1 if this CPU ever falls
+ * behind) instead of blindly trusting "one call = one frame". COMM_TICK is
+ * a plain 68000-written register, never consumed/reset by a read (unlike a
+ * queue), so a second independent reader here is exactly as safe as this
+ * file already reading COMM6/COMM2, both nominally "for" the slave. */
+static uint8_t g_driftTick;
 
 /* RSDKv5's layer-level Y scroll -- see the BG_LAYER_SCROLL_POS/
  * BG_LAYER_PARALLAX_Q8 comment above for the formula this reduces from.
@@ -283,21 +345,24 @@ static uint16_t layer_first_row(uint16_t camY)
 }
 
 /* Fills STRIP_W pixels of screen line l's dedicated slot from background
- * row `row`, starting at background column base (must be a multiple of 4
- * -- see bg_init()'s and bg_frame()'s base calculations), wrapping
- * horizontally at the map's width. Walks blocks rather than pixels: only
- * the map lookup is per-block, the actual copy is a tight run of up to 16
- * bytes. Never called for a flat line (lineFlat[l]); those read a shared
- * slot fill_flat_slot() paints once instead, and never call this again for
- * as long as they stay flat. */
-static void draw_strip(int l, int row, uint16_t base)
+ * row `row`, starting at background column base+phase (base must be a
+ * multiple of 4 -- see bg_init()'s and bg_frame()'s base calculations;
+ * phase is 0 or 1, the sub-word drift parity linePhase[] documents),
+ * wrapping horizontally at the map's width. Walks blocks rather than
+ * pixels: only the map lookup is per-block, the actual copy is a tight run
+ * of up to 16 bytes. Never called for a flat line (lineFlat[l]); those
+ * read a shared slot fill_flat_slot() paints once instead, and never call
+ * this again for as long as they stay flat. */
+static void draw_strip(int l, int row, uint16_t base, uint8_t phase)
 {
 	int blockRow = row >> 4, rowInBlock = row & 15;
 	const uint16_t *mapRow = g_bg_map + (uint32_t)blockRow * MAP_BLOCKS_W;
 	volatile uint8_t *dst = (volatile uint8_t *)((&MARS_FRAMEBUFFER) + BG_DATA_WORD)
 	                       + (uint32_t)l * STRIP_W;
-	uint16_t x = base;
+	uint16_t x = (uint16_t)(base + phase);
 	int done = 0;
+
+	if (x >= MAP_W_PX) x -= MAP_W_PX;
 
 	while (done < STRIP_W) {
 		int blockCol = (x >> 4) & (MAP_BLOCKS_W - 1);
@@ -312,16 +377,22 @@ static void draw_strip(int l, int row, uint16_t base)
 		/* Longword stores measure 11% faster than word stores for
 		 * framebuffer writes (hardware-budget.md sec 2), and this loop
 		 * used to write a byte at a time -- one bus cycle per pixel, the
-		 * single biggest cost in the old profile. Safe as longwords here
-		 * because base (and so every x this loop reaches) is a multiple
-		 * of 4, which keeps colInBlock, and so n, a multiple of 4 too;
-		 * g_bg_blocks is forced 4-aligned in assets.s so src lines up the
-		 * same way. The byte tail below only fires if that invariant is
-		 * ever broken, e.g. by a future STRIP_W that isn't a multiple of
-		 * 4 -- it should never execute as things stand. */
+		 * single biggest cost in the old profile. With phase == 0 (every
+		 * line but the sub-pixel cloud rows) base keeps colInBlock, and so
+		 * n, a multiple of 4, g_bg_blocks is forced 4-aligned in assets.s,
+		 * and dst advances in those same multiples -- the longword path
+		 * runs for the whole strip, exactly as before phase existed. With
+		 * phase == 1 both src and dst sit one byte off for every run, the
+		 * guard fails, and the strip goes through the byte loop: the SH2
+		 * faults on misaligned longword reads (the descriptor alignment
+		 * bug taught this port that the hard way), so slow-and-correct is
+		 * the only safe direct copy. That cost is why linePhase[] scopes
+		 * phase to the 32 sub-pixel cloud lines and bg_frame() gates their
+		 * redraws to a parked camera. */
 		k = 0;
-		for (; k + 4 <= n; k += 4)
-			*(volatile uint32_t *)(dst + k) = *(const uint32_t *)(src + k);
+		if ((((uint32_t)(uintptr_t)src | (uint32_t)(uintptr_t)dst) & 3u) == 0)
+			for (; k + 4 <= n; k += 4)
+				*(volatile uint32_t *)(dst + k) = *(const uint32_t *)(src + k);
 		for (; k < n; k++) dst[k] = src[k];
 
 		dst += n;
@@ -446,6 +517,11 @@ void bg_init(void)
 		parallaxQ8[row] = g_bg_lines[row].parallax;
 		speedQ8[row]    = g_bg_lines[row].speed;
 		driftAccum[row] = 0;
+		/* Strictly sub-pixel drifters get 1 px table granularity via
+		 * content phase -- see linePhase[]'s comment. Rows at exactly
+		 * 1 px/frame and up step 2 px at 30 Hz or faster, which already
+		 * reads as smooth and would double the redraw load. */
+		rowSubPx[row] = (uint8_t)(speedQ8[row] > 0 && speedQ8[row] < 256);
 	}
 
 	classify_rows();
@@ -470,6 +546,7 @@ void bg_init(void)
 		row = (firstRow + l) % LAYER_H_PX;
 		lineRow[l] = (uint16_t)row;
 		framesDirty[l] = 0;
+		linePhase[l] = 0;
 		if (rowFlat[row]) {
 			lineFlat[l] = 1;
 			lineFlatSlot[l] = rowFlatSlot[row];
@@ -485,11 +562,11 @@ void bg_init(void)
 	 * frames trick blitbench's vf_fill_bank(x2) uses for its own static
 	 * content. */
 	for (l = 0; l < SCREEN_HEIGHT; l++)
-		if (!lineFlat[l]) draw_strip(l, lineRow[l], bgBase[l]);
+		if (!lineFlat[l]) draw_strip(l, lineRow[l], bgBase[l], 0);
 	for (i = 0; i < flatColourCount; i++) fill_flat_slot(i, flatColourVal[i]);
 	Hw32xScreenFlip(1);
 	for (l = 0; l < SCREEN_HEIGHT; l++)
-		if (!lineFlat[l]) draw_strip(l, lineRow[l], bgBase[l]);
+		if (!lineFlat[l]) draw_strip(l, lineRow[l], bgBase[l], 0);
 	for (i = 0; i < flatColourCount; i++) fill_flat_slot(i, flatColourVal[i]);
 	Hw32xScreenFlip(1);
 
@@ -502,6 +579,13 @@ void bg_init(void)
 		    ? (uint16_t)(BG_DATA_WORD + (uint32_t)SCREEN_HEIGHT * STRIP_WORDS
 		                + (uint32_t)lineFlatSlot[l] * FLAT_STRIP_WORDS)
 		    : (uint16_t)(BG_DATA_WORD + (uint32_t)l * STRIP_WORDS);
+
+	/* Seeds g_driftTick's baseline: whatever the 68000 has already ticked
+	 * up to by the time this CPU reaches here, so the first bg_frame() call
+	 * sees a tickDelta of 0 or 1, never a spurious backlog of every tick
+	 * since power-on (see g_driftTick's comment above line_offset()). */
+	g_driftTick = (uint8_t)(COMM_TICK >> 8);
+	prevCamX = camX;
 
 	pendingCount = 0;
 }
@@ -522,8 +606,31 @@ void bg_frame(void)
 	uint8_t  bestLine[REBASE_CAP];
 	uint8_t n = 0, k, worst;
 	int l, row;
+	/* How many real 68000 vblanks actually elapsed since the last call --
+	 * see g_driftTick's comment above line_offset(). Unsigned subtraction
+	 * on two uint8_t tick samples wraps correctly through 255->0 the same
+	 * way comm_wait_tick's own tick comparison does. Normally 1; 0 if this
+	 * loop is running ahead of the real display frame (the bug this guards
+	 * against -- driftAccum simply does not advance that call, capping the
+	 * whole layer's drift rate at the true display rate instead of
+	 * whatever rate Hw32xScreenFlip's bank-select wait happens to return
+	 * at); >1 only if this CPU ever fell behind, in which case the drift
+	 * correctly catches up by that many ticks' worth in one step. */
+	uint8_t tick = (uint8_t)(COMM_TICK >> 8);
+	uint8_t tickDelta = (uint8_t)(tick - g_driftTick);
+	/* Phase-only redraws (see linePhase[]) are gated to a parked camera:
+	 * that is the only time a 1 px step is distinguishable from a 2 px one,
+	 * and it is also exactly when the rebase pool below is otherwise empty,
+	 * so their draw cost never stacks on top of real scrolling load. While
+	 * the camera moves, a stale phase is invisible and self-corrects for
+	 * free the next time the line rebases for any ordinary reason. */
+	uint8_t camStatic = (camX == prevCamX);
 
-	for (row = 0; row < LAYER_H_PX; row++) driftAccum[row] += speedQ8[row];
+	prevCamX = camX;
+	g_driftTick = tick;
+
+	for (row = 0; row < LAYER_H_PX; row++)
+		driftAccum[row] += (uint32_t)speedQ8[row] * tickDelta;
 
 	/* Finish last frame's rebases first: redraw the already-committed
 	 * row/base into THIS frame's write-target bank -- the physical bank
@@ -540,7 +647,7 @@ void bg_frame(void)
 	for (l = 0; l < pendingCount; l++) {
 		int line = pendingLines[l];
 
-		draw_strip(line, lineRow[line], bgBase[line]);
+		draw_strip(line, lineRow[line], bgBase[line], linePhase[line]);
 	}
 	pendingCount = 0;
 
@@ -587,6 +694,18 @@ void bg_frame(void)
 			} else if (d > TRIGGER) {
 				targetRow = lineRow[l];
 				urgency = d;
+			} else if (camStatic && rowSubPx[lineRow[l]]
+			           && (uint8_t)(d & 1) != linePhase[l]) {
+				/* Sub-pixel drift parity flipped and the camera is
+				 * parked: the strip's content is 1 px stale (see
+				 * linePhase[]). Ranked at TRIGGER so any real
+				 * horizontal pressure -- which only exists while the
+				 * camera moves, when this class is gated off anyway --
+				 * always outranks it. The commit below recentres and
+				 * redraws exactly like any other candidate, which is
+				 * what updates the phase. */
+				targetRow = lineRow[l];
+				urgency = TRIGGER;
 			} else {
 				continue;
 			}
@@ -618,16 +737,21 @@ void bg_frame(void)
 	for (k = 0; k < n; k++) {
 		int line = bestLine[k];
 		int row2 = bestRow[k];
-		uint16_t base = (uint16_t)((line_offset(row2, camX) - MARGIN)
-		               & (MAP_W_PX - 1)) & ~3u;
+		uint16_t o = line_offset(row2, camX);
+		uint16_t base = (uint16_t)((o - MARGIN) & (MAP_W_PX - 1)) & ~3u;
+		uint16_t d = (uint16_t)(o - base) & (MAP_W_PX - 1);
 
 		lineRow[line] = (uint16_t)row2;
 		lineFlat[line] = 0;
 		lineWordBase[line] = (uint16_t)(BG_DATA_WORD + (uint32_t)line * STRIP_WORDS);
 		bgBase[line] = base;
-		draw_strip(line, row2, base);
+		/* Sub-pixel rows bake the current drift parity into the strip
+		 * content (see linePhase[]); every other row keeps phase 0 and the
+		 * exact pre-phase behaviour. */
+		linePhase[line] = (uint8_t)(rowSubPx[row2] ? (d & 1) : 0);
+		draw_strip(line, row2, base, linePhase[line]);
 		pendingLines[pendingCount++] = (uint8_t)line;
-		delta[line] = (uint16_t)(line_offset(row2, camX) - base) & (MAP_W_PX - 1);
+		delta[line] = d;
 		framesDirty[line] = 0;
 	}
 
@@ -654,6 +778,15 @@ void bg_frame(void)
 		 * layer_first_row()'s comment describes, never a read past the
 		 * strip's own edge. */
 		if (d > SLACK) d = SLACK;
+		/* Back the drawn-in phase out of the table offset (strip byte 0
+		 * holds background pixel bgBase+linePhase, see linePhase[]): the
+		 * word offset is floor((d - phase) / 2), giving 1 px effective
+		 * granularity for phased lines and reducing to the old (d >> 1)
+		 * for the phase-0 rest. d < phase can only happen on a line whose
+		 * parity went stale near delta 0 (phase redraw still queued);
+		 * showing base content 1 px off for those frames is exactly the
+		 * pre-phase behaviour, so clamp to 0, never wrap. */
+		d = (uint16_t)(d >= linePhase[l] ? d - linePhase[l] : 0);
 		table[l] = (uint16_t)(lineWordBase[l] + (d >> 1));
 	}
 
