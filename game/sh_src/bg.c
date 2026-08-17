@@ -64,9 +64,10 @@
  *    shipped asset this settles to ~2-3 strip draws/frame on average once
  *    the camera stops, against a constant 56 every frame, moving or not,
  *    before this change -- plus, since sub-word drift phasing (linePhase[]
- *    below) landed, ~12 selections/frame of parked-camera phase redraws
- *    for the two sub-pixel cloud bands, byte-copied, still nowhere near
- *    the cap. Worst case (fast camera on both axes at once) is
+ *    below) landed, up to ~44 selections/frame of slow-camera phase
+ *    redraws across the three cloud bands (the 1 px/frame top band flips
+ *    parity every frame), spliced longword draws, bounded by the same
+ *    cap. Worst case (fast camera on both axes at once) is
  *    a flat 80/frame, capped and stable -- see the constants below for the
  *    worst-case math, and layer_first_row()'s comment for the vertical
  *    case specifically, which looks like it should be able to fall behind
@@ -210,7 +211,7 @@ static const BgLine   *g_bg_lines;    /* one parallax/speed pair per background 
 static uint16_t parallaxQ8[LAYER_H_PX];    /* Q8, 256 = 1.0 */
 static uint16_t speedQ8[LAYER_H_PX];       /* Q8 px/frame */
 static uint32_t driftAccum[LAYER_H_PX];    /* Q8.8 px, wraps mod map width */
-static uint8_t  rowSubPx[LAYER_H_PX];      /* row drifts at under 1 px/frame -- see linePhase[] */
+static uint8_t  rowPhased[LAYER_H_PX];     /* row drifts on its own -- phase-corrected, see linePhase[] */
 static uint8_t  rowFlat[LAYER_H_PX];       /* 1 if this row is one block, one colour */
 static uint8_t  rowFlatSlot[LAYER_H_PX];   /* which flatColourVal[], valid only if rowFlat[row] */
 
@@ -244,19 +245,24 @@ static uint8_t  framesDirty[SCREEN_HEIGHT];  /* saturates at 255; only used to r
  * the pixel-parity its strip was last DRAWN with (strip byte 0 = background
  * pixel bgBase+linePhase), and the table write subtracts it back out --
  * effective granularity 1 px, at the price of a strip redraw whenever a
- * sub-pixel row's parity flips. Scoped to rowSubPx[] rows only (speeds
- * strictly under 1 px/frame: the two far cloud bands, 32 lines): the
- * 1 px/frame band already steps its 2 px at 30 Hz, which reads as smooth,
- * and phasing it would cost 64 redraws every frame. Redraw scheduling and
- * budget are the ordinary candidate pool below -- see bg_frame(). */
+ * drifting row's parity flips (at any camera speed: cloud offsets no
+ * longer couple to the camera, see bg_init()). Scoped to rowPhased[]
+ * rows (all 64 cloud lines, the only self-movers): the top band's parity
+ * flips every frame, so it alone wants 32 redraws/frame plus their
+ * second-bank catch-ups -- affordable only because a shifted strip draws
+ * through draw_strip_shift1()'s spliced longword path at near-aligned
+ * cost, not the byte loop. Scheduling and budget are the ordinary
+ * candidate pool, REBASE_CAP included; a line the cap defers shows a 1 px
+ * lag for a frame, aged fairly via framesDirty[] -- see bg_frame(). */
 static uint8_t  linePhase[SCREEN_HEIGHT];
-static uint16_t prevCamX;   /* last frame's camX: gates phase-only redraws to a parked camera */
 
 /* Lines rebased THIS real frame still need their base redrawn into the
  * OTHER physical bank next real frame before both banks agree -- see the
- * pendingLines comment in bg_frame(). */
-static uint8_t pendingLines[REBASE_CAP];
-static uint8_t pendingCount;
+ * pendingLines comment in bg_frame(). Sized for the worst frame: a full
+ * REBASE_CAP pool commit plus the uncapped phase pass over every line
+ * (see the phase pass in bg_frame()). */
+static uint8_t  pendingLines[REBASE_CAP + SCREEN_HEIGHT];
+static uint16_t pendingCount;   /* can exceed 255: the array above holds 264 */
 
 /* Current background-space X for background row (not screen line -- see
  * the per-row arrays above) row: the drift accumulated so far, plus the
@@ -353,16 +359,68 @@ static uint16_t layer_first_row(uint16_t camY)
  * of up to 16 bytes. Never called for a flat line (lineFlat[l]); those
  * read a shared slot fill_flat_slot() paints once instead, and never call
  * this again for as long as they stay flat. */
+/* draw_strip()'s phase == 1 twin: fills screen line l's slot with the
+ * background pixels [base+1, base+1+STRIP_W), where base is 4-aligned, by
+ * reading the ALIGNED source stream starting at base and splicing each
+ * output longword from an adjacent pair -- out[w] = bytes 1..4 of the
+ * 8-byte window at base+4w, i.e. (prev << 8) | (cur >> 24) on a stream
+ * kept one longword ahead. Both loads and stores stay longword-sized and
+ * 4-aligned throughout (the SH2 faults on misaligned longs, and byte
+ * stores were the old profile's single biggest cost), so a shifted strip
+ * costs about the same as an aligned one plus the shifts -- which is what
+ * makes phasing the 1 px/frame cloud band every frame affordable at all;
+ * see linePhase[]. Needs one longword beyond the strip's span, hence
+ * total = STRIP_W/4 + 1 fetches for STRIP_W/4 stores. */
+static void draw_strip_shift1(int l, int row, uint16_t base)
+{
+	int blockRow = row >> 4, rowInBlock = row & 15;
+	const uint16_t *mapRow = g_bg_map + (uint32_t)blockRow * MAP_BLOCKS_W;
+	volatile uint32_t *dst = (volatile uint32_t *)
+	    ((volatile uint8_t *)((&MARS_FRAMEBUFFER) + BG_DATA_WORD)
+	     + (uint32_t)l * STRIP_W);
+	uint16_t x = base;
+	uint32_t prev = 0;
+	int fetched = 0;
+	int total = STRIP_W / 4 + 1;
+
+	while (fetched < total) {
+		int blockCol = (x >> 4) & (MAP_BLOCKS_W - 1);
+		int colInBlock = x & 15;
+		int nLongs = (16 - colInBlock) >> 2;
+		const uint32_t *src = (const uint32_t *)(g_bg_blocks
+		                     + (uint32_t)mapRow[blockCol] * BLOCK_BYTES
+		                     + rowInBlock * 16 + colInBlock);
+		int k;
+
+		if (nLongs > total - fetched) nLongs = total - fetched;
+
+		for (k = 0; k < nLongs; k++) {
+			uint32_t cur = src[k];
+
+			if (fetched + k > 0)
+				*dst++ = (prev << 8) | (cur >> 24);
+			prev = cur;
+		}
+
+		fetched += nLongs;
+		x = (uint16_t)(x + (nLongs << 2));
+		if (x >= MAP_W_PX) x -= MAP_W_PX;
+	}
+}
+
 static void draw_strip(int l, int row, uint16_t base, uint8_t phase)
 {
 	int blockRow = row >> 4, rowInBlock = row & 15;
 	const uint16_t *mapRow = g_bg_map + (uint32_t)blockRow * MAP_BLOCKS_W;
 	volatile uint8_t *dst = (volatile uint8_t *)((&MARS_FRAMEBUFFER) + BG_DATA_WORD)
 	                       + (uint32_t)l * STRIP_W;
-	uint16_t x = (uint16_t)(base + phase);
+	uint16_t x = base;
 	int done = 0;
 
-	if (x >= MAP_W_PX) x -= MAP_W_PX;
+	if (phase) {
+		draw_strip_shift1(l, row, base);
+		return;
+	}
 
 	while (done < STRIP_W) {
 		int blockCol = (x >> 4) & (MAP_BLOCKS_W - 1);
@@ -381,14 +439,12 @@ static void draw_strip(int l, int row, uint16_t base, uint8_t phase)
 		 * line but the sub-pixel cloud rows) base keeps colInBlock, and so
 		 * n, a multiple of 4, g_bg_blocks is forced 4-aligned in assets.s,
 		 * and dst advances in those same multiples -- the longword path
-		 * runs for the whole strip, exactly as before phase existed. With
-		 * phase == 1 both src and dst sit one byte off for every run, the
-		 * guard fails, and the strip goes through the byte loop: the SH2
-		 * faults on misaligned longword reads (the descriptor alignment
-		 * bug taught this port that the hard way), so slow-and-correct is
-		 * the only safe direct copy. That cost is why linePhase[] scopes
-		 * phase to the 32 sub-pixel cloud lines and bg_frame() gates their
-		 * redraws to a parked camera. */
+		 * runs for the whole strip, exactly as before phase existed
+		 * (phase == 1 never reaches here -- it dispatches to
+		 * draw_strip_shift1() above, which keeps everything aligned by
+		 * splicing instead). The guard and byte tail below are pure
+		 * defence for a broken invariant, same as the original comment
+		 * promised. */
 		k = 0;
 		if ((((uint32_t)(uintptr_t)src | (uint32_t)(uintptr_t)dst) & 3u) == 0)
 			for (; k + 4 <= n; k += 4)
@@ -518,10 +574,30 @@ void bg_init(void)
 		speedQ8[row]    = g_bg_lines[row].speed;
 		driftAccum[row] = 0;
 		/* Strictly sub-pixel drifters get 1 px table granularity via
-		 * content phase -- see linePhase[]'s comment. Rows at exactly
-		 * 1 px/frame and up step 2 px at 30 Hz or faster, which already
-		 * reads as smooth and would double the redraw load. */
-		rowSubPx[row] = (uint8_t)(speedQ8[row] > 0 && speedQ8[row] < 256);
+		 * content phase -- see linePhase[]'s comment. The 1 px/frame top
+		 * band is deliberately left OUT: its 2 px steps at 30 Hz already
+		 * read as smooth (A/B-tested), and phasing it means redrawing all
+		 * 32 of its lines every single frame, which in practice made the
+		 * picture WORSE, not better -- the sustained every-frame draw
+		 * load can push a bank swap past its deadline now and then, and
+		 * one missed swap shows a stale bank: a 2 px hiccup on top of the
+		 * 1 px flow, more visible than the 30 Hz stepping it replaced. */
+		rowPhased[row] = (uint8_t)(speedQ8[row] > 0 && speedQ8[row] < 256);
+
+		/* DELIBERATE DEVIATION (user's call, 2026-08-17): the drifting
+		 * rows -- the cloud bands -- lose their camera parallax and keep
+		 * only their own drift. The original moves them at parallax/256
+		 * of the camera too, but at walking speeds that puts their pixel
+		 * crossings at 4-13 Hz, and through this renderer's 2 px line
+		 * table that reads as a distracting lurch; a sky pinned to the
+		 * horizon was judged the better classic-hardware look, the same
+		 * choice plenty of MD-era games made. Surgical on purpose: the
+		 * converted asset keeps the true value, only this line forgets
+		 * it, and deleting this line restores the original behaviour.
+		 * It also decouples cloud offsets from the camera entirely,
+		 * which is what lets the phase pass below run ungated at any
+		 * camera speed. */
+		if (speedQ8[row] > 0) parallaxQ8[row] = 0;
 	}
 
 	classify_rows();
@@ -585,7 +661,6 @@ void bg_init(void)
 	 * sees a tickDelta of 0 or 1, never a spurious backlog of every tick
 	 * since power-on (see g_driftTick's comment above line_offset()). */
 	g_driftTick = (uint8_t)(COMM_TICK >> 8);
-	prevCamX = camX;
 
 	pendingCount = 0;
 }
@@ -618,15 +693,6 @@ void bg_frame(void)
 	 * correctly catches up by that many ticks' worth in one step. */
 	uint8_t tick = (uint8_t)(COMM_TICK >> 8);
 	uint8_t tickDelta = (uint8_t)(tick - g_driftTick);
-	/* Phase-only redraws (see linePhase[]) are gated to a parked camera:
-	 * that is the only time a 1 px step is distinguishable from a 2 px one,
-	 * and it is also exactly when the rebase pool below is otherwise empty,
-	 * so their draw cost never stacks on top of real scrolling load. While
-	 * the camera moves, a stale phase is invisible and self-corrects for
-	 * free the next time the line rebases for any ordinary reason. */
-	uint8_t camStatic = (camX == prevCamX);
-
-	prevCamX = camX;
 	g_driftTick = tick;
 
 	for (row = 0; row < LAYER_H_PX; row++)
@@ -694,18 +760,6 @@ void bg_frame(void)
 			} else if (d > TRIGGER) {
 				targetRow = lineRow[l];
 				urgency = d;
-			} else if (camStatic && rowSubPx[lineRow[l]]
-			           && (uint8_t)(d & 1) != linePhase[l]) {
-				/* Sub-pixel drift parity flipped and the camera is
-				 * parked: the strip's content is 1 px stale (see
-				 * linePhase[]). Ranked at TRIGGER so any real
-				 * horizontal pressure -- which only exists while the
-				 * camera moves, when this class is gated off anyway --
-				 * always outranks it. The commit below recentres and
-				 * redraws exactly like any other candidate, which is
-				 * what updates the phase. */
-				targetRow = lineRow[l];
-				urgency = TRIGGER;
 			} else {
 				continue;
 			}
@@ -748,7 +802,7 @@ void bg_frame(void)
 		/* Sub-pixel rows bake the current drift parity into the strip
 		 * content (see linePhase[]); every other row keeps phase 0 and the
 		 * exact pre-phase behaviour. */
-		linePhase[line] = (uint8_t)(rowSubPx[row2] ? (d & 1) : 0);
+		linePhase[line] = (uint8_t)(rowPhased[row2] ? (d & 1) : 0);
 		draw_strip(line, row2, base, linePhase[line]);
 		pendingLines[pendingCount++] = (uint8_t)line;
 		delta[line] = d;
@@ -763,6 +817,42 @@ void bg_frame(void)
 		for (k = 0; k < n; k++)
 			if (bestLine[k] == (uint8_t)l) break;
 		if (k == n && framesDirty[l] != 0xFFu) framesDirty[l]++;
+	}
+
+	/* Phase pass: NOT part of the capped pool above, on purpose. Every
+	 * line of a drifting band flips parity on the same frame (driftAccum
+	 * is per row and identical across a band), and when the three bands
+	 * align that is 64 lines at once -- ration those through REBASE_CAP
+	 * and a rotating minority steps a frame late, which reads as scanline
+	 * shear crawling through the clouds (reported, observed, fixed here).
+	 * A pure parity flip redraws the SAME base with the pixels shifted
+	 * one; it does not spend slack or change rows, so it does not need
+	 * the pool's rationing, it needs simultaneity: all flipped lines
+	 * redraw in this one pass, atomically per band, through
+	 * draw_strip_shift1()'s spliced path (~1/3 of an otherwise-idle
+	 * master frame at the 64-line worst). Lines the pool just committed
+	 * are skipped automatically: their delta[]/linePhase[] were updated
+	 * coherently by the commit, so the parity test below is already
+	 * false. Row-dirty lines wait for the pool (wrong row outranks a 1 px
+	 * phase lag; their strip gets the right phase when it gets the right
+	 * row). Runs at every camera speed: cloud offsets no longer couple to
+	 * the camera at all (see bg_init()'s deliberate parallax deviation),
+	 * so their parity flips stay at the drift rate -- cheap -- no matter
+	 * how fast the level scrolls. */
+	{
+		for (l = 0; l < SCREEN_HEIGHT; l++) {
+			uint8_t ph;
+
+			if (lineFlat[l] || !rowPhased[lineRow[l]]) continue;
+			if ((uint16_t)((firstRow + l) % LAYER_H_PX) != lineRow[l])
+				continue;
+			ph = (uint8_t)(delta[l] & 1);
+			if (ph == linePhase[l]) continue;
+			linePhase[l] = ph;
+			draw_strip(l, lineRow[l], bgBase[l], ph);
+			if (pendingCount < (uint16_t)(sizeof pendingLines))
+				pendingLines[pendingCount++] = (uint8_t)l;
+		}
 	}
 
 	for (l = 0; l < SCREEN_HEIGHT; l++) {
