@@ -46,6 +46,15 @@ void s_main(void)
 	uint32_t screenCenterY = assets_init();
 	int32_t prevScreenTop;
 
+	/* comm.h's COMM6 packing keeps camY inside 12 bits (<= 4096) so it never
+	 * collides with dispRot/drawGroupHigh in bits [15:12]; g_map_h*16 is the
+	 * FG layer height in px, the ceiling camY can ever reach (bounds_init,
+	 * bounds.c). Trap here, once map_h is known, rather than let a future
+	 * taller act silently corrupt dispRot/drawGroupHigh every frame after. */
+	if ((uint32_t)g_map_h * 16u > 4096u) {
+		for (;;) { }
+	}
+
 	/* Where the scene actually puts the player, read out of Scene1.bin's
 	 * object list rather than eyeballed off the tilemap. */
 	player_init(&sonic, PLAYER_SPAWN_X, PLAYER_SPAWN_Y);
@@ -173,6 +182,6 @@ void s_main(void)
 
 		comm_publish_frame(camX, camY, worldX, worldY,
 		                   sonic_anim_frame_index(&sonic.animator), sonic.direction,
-		                   sonic.drawGroupHigh);
+		                   sonic.drawGroupHigh, sonic.rotation);
 	}
 }

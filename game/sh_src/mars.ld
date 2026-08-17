@@ -26,19 +26,29 @@ SEARCH_DIR(.)
  * +--------------------+ <- 0x0603FC00
  */
 
-/* rom is capped just ahead of maphigh below, so the SH2 program's
+/* rom is capped just ahead of sonicrot below, so the SH2 program's
  * .text/.data load image overflowing becomes a hard link error instead of
- * silently landing on top of maphigh's data. The 68000's stricter limit,
- * its program staying inside the fixed 512 KB cartridge window, is enforced
- * separately by the M68K_CODE_END ASSERT at the bottom of this script,
- * since rom's LENGTH now runs past 512 KB. */
+ * silently landing on top of the rotated-sprite data. The 68000's stricter
+ * limit, its program staying inside the fixed 512 KB cartridge window, is
+ * enforced separately by the M68K_CODE_END ASSERT at the bottom of this
+ * script, since rom's LENGTH now runs past 512 KB. */
 MEMORY {
-	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x000C0000
+	rom (rx) : ORIGIN = 0x02000000, LENGTH = 0x00094000
+
+	/* Sonic's baked rotated frames (assets/sonic/rot_tiles.bin, sh_src/
+	 * sonic_rot.s), placed right after rom's shrunken end so both CPUs reach
+	 * them with no bank switch -- the SH2 sees them directly at this ORIGIN,
+	 * and the 68000 sees the same bytes at the fixed pointer 0x994000
+	 * (md_src/sonic.c's sonic_rot_tiles_md). This ORIGIN, that pointer and
+	 * sonic_rot.s's AT() load address are a hand-synced trio: change one,
+	 * change all three -- same convention as maphigh's own trio just below. */
+	sonicrot (r) : ORIGIN = 0x02094000, LENGTH = 0x0002C000
+
 	ram (wx) : ORIGIN = 0x06000000, LENGTH = 0x0003FC00
 
 	/* FG High's map (assets/ghz/map_fgh.bin, sh_src/map_fgh.s), too big for
 	 * the 68000's own ROM window so it is linked here instead: cartridge
-	 * offset 0xC0000, right after rom above, ending exactly at the 1 MB
+	 * offset 0xC0000, right after sonicrot above, ending exactly at the 1 MB
 	 * boundary the 68000's bank 0 covers. Both CPUs reach this
 	 * address with no bank switch -- the SH2s see it directly at this
 	 * ORIGIN, and the 68000 sees the same bytes at the fixed pointer
@@ -87,6 +97,16 @@ SECTIONS {
 		. = ALIGN(0x4);
 	} > rom
 	_stext = SIZEOF (.text);
+
+	/* rot_tiles.bin, whole and unparsed -- see MEMORY's sonicrot comment
+	 * above. AT(0x00094000) keeps its load address contiguous with .text's
+	 * LMA range (AT(0x00000000) above) in the flat .32x image, right after
+	 * rom's shrunken 0x94000, matching maphigh's own AT() convention just
+	 * below. KEEP: nothing else references this section by name, so without
+	 * it a garbage-collecting link could drop it. */
+	.sonicrot 0x02094000 : AT(0x00094000) {
+		KEEP(*(.sonicrot))
+	} > sonicrot
 
 	/* map_fgh.bin, whole and unparsed -- see MEMORY's maphigh comment above.
 	 * AT(0x00080000) keeps its load address contiguous with .text's LMA

@@ -93,6 +93,27 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
       entry has the exact clamp chain). `md_src/sonic.c`'s sprite priority
       now follows that bit instead of a fixed low, matching
       `PlaneSwitch_CheckCollisions`' `other->drawGroup` write
+- [x] **Sonic leans through loops.** `Player_HandleGroundRotation`/
+      `HandleAirRotation` (Player.c:3207-3254) are transcribed onto the
+      slave SH2 (`sh_src/player.c`), computed every frame exactly like the
+      original regardless of animation, the same way `Player_State_Ground`/
+      `Roll`/`TubeRoll`/`TubeAirRoll` all call it unconditionally. The MD has
+      no sprite rotation, so this port shows the classic-engine rendition:
+      8 stepped orientations instead of RSDK's smooth spin, snapped by the
+      engine's own `ROTSTYLE_45DEG` formula (`Drawing.cpp:2703-2704`) and
+      carried to the 68000 in 3 new bits of COMM6 (`sh_src/comm.h`'s repack,
+      alongside camera Y and `drawGroupHigh`). Only 3 of the 8 orientations
+      are baked art (45/90/135 degrees, `tools/convert_sonic.py`, nearest-
+      neighbour sampled about the frame pivot the way `DrawSpriteRotozoom`
+      would at those exact angles -- 90 degrees comes out an exact
+      transpose+flip); the rest are flips `md_src/sonic.c` composes at
+      render time: facing left negates the step before lookup, and the
+      upper 4 steps are the lower 4 with both axes flipped. IDLE/PUSH/LOOK
+      UP/CROUCH use the original's other rotation style, a plain flipH+flipV
+      at the halfway point, no baked art needed; rolling and skidding never
+      rotate, matching the original's own per-animation rotation style.
+      113 KB of rotated tiles, comfortably under the budget `sh_src/mars.ld`
+      carves out of the SH2's own ROM region for them
 
 ## Next
 

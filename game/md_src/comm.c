@@ -8,13 +8,15 @@ void comm_boot_publish(uint32_t descriptorOffset, uint16_t screenCenterY)
 }
 
 int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *worldY,
-                     uint16_t *frameIndex, uint8_t *facing, uint8_t *drawGroupHigh)
+                     uint16_t *frameIndex, uint8_t *facing, uint8_t *drawGroupHigh,
+                     uint8_t *dispRot)
 {
 	static uint16_t cCamX, cCamY;
 	static int16_t cWorldX, cWorldY;
 	static uint16_t cFrameIndex;
 	static uint8_t cFacing;
 	static uint8_t cDrawGroupHigh;
+	static uint8_t cDispRot;
 	static int32_t lastSeq = -1;
 	int attempt;
 
@@ -42,10 +44,11 @@ int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *wo
 
 			if (seq2 == seq1) {
 				cCamX = cx;
-				/* bits [14:0] camera Y, bit 15 drawGroupHigh -- split here,
-				 * once, so *camY is always the clean coordinate (sh_src/
-				 * comm.h's COMM6 entry). */
-				cCamY = cyWord & 0x7FFFu;
+				/* bits [11:0] camera Y, bits [14:12] dispRot, bit 15
+				 * drawGroupHigh -- split here, once, so *camY is always the
+				 * clean coordinate (sh_src/comm.h's COMM6 entry). */
+				cCamY = cyWord & 0x0FFFu;
+				cDispRot = (uint8_t)((cyWord >> 12) & 7u);
 				cDrawGroupHigh = (uint8_t)((cyWord >> 15) & 1u);
 				cWorldX = (int16_t)wx;
 				cWorldY = (int16_t)wy;
@@ -65,6 +68,7 @@ int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *wo
 	*frameIndex = cFrameIndex;
 	*facing = cFacing;
 	*drawGroupHigh = cDrawGroupHigh;
+	*dispRot = cDispRot;
 
 	return lastSeq >= 0;
 }

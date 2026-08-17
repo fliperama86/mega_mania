@@ -31,7 +31,7 @@ typedef struct {
 
 enum { ANI_IDLE, ANI_WALK, ANI_JOG, ANI_RUN, ANI_DASH, ANI_SKID, ANI_SKID_TURN, ANI_AIR_WALK, ANI_JUMP, ANI_PUSH, ANI_LOOK_UP, ANI_CROUCH, SONIC_ANIM_COUNT };
 
-#define SONIC_MAX_FRAME_TILES 24
+#define SONIC_MAX_FRAME_TILES 33
 #define SONIC_MAX_PIECES      4
 #define SONIC_FRAME_COUNT     106   /* rows in hitbox.bin, and the
                                      * valid range of the comm frameIndex

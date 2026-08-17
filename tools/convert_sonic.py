@@ -43,6 +43,7 @@ Usage: convert_sonic.py <Data.rsdk> <assetdir> <srcdir>
 """
 
 import io
+import math
 import os
 import struct
 import sys
@@ -59,6 +60,34 @@ ANIMATIONS = ["Idle", "Walk", "Jog", "Run", "Dash", "Skid", "Skid Turn",
               "Air Walk", "Jump", "Push", "Look Up", "Crouch"]
 SHEET_DIR = "Data/Sprites/"
 PALETTE_COLOURS = 15   # usable colours; pal.bin entry 0 is transparent
+
+# Player.c's animator.rotationStyle per animation (not computed here -- it
+# rides each animation's own .ani data in the pack, outside anim.py's parsed
+# fields -- but this port's design already settled which of the three
+# applies to each of the twelve animations converted, see docs/green-hill.md
+# and sh_src/player.h's rotation field comment):
+#   ROTSTYLE_FULL (smooth in the original): baked as 8 stepped orientations
+#   here, 3 of which (45/90/135 degrees) need new baked art -- the rest are
+#   flips of those three or of the unrotated frame (md_src/sonic.c).
+ROTATE_ANIMS = {"Walk", "Jog", "Run", "Dash", "Air Walk"}
+# ROTSTYLE_180DEG: only two states (upright / flipped both axes), which is
+# an exact pixel operation (rotating a raster 180 degrees is flipH+flipV) --
+# no baked art needed, md_src/sonic.c does it with the existing frame.
+ROT180_ANIMS = {"Idle", "Push", "Look Up", "Crouch"}
+# Everything else (Skid, Skid Turn, Jump) is ROTSTYLE_NONE in the original
+# sprite sheet: rotation is computed every frame (sh_src/player.c) but never
+# displayed for these.
+ROTCLASS_NONE, ROTCLASS_R180, ROTCLASS_FULL = 0, 1, 2
+
+# RSDK's rotation unit is 0-511 over a full turn (sh_src/player.h); 64 units
+# is 45 degrees. Only these three need baked art -- 0/180 are the unrotated
+# frame and its flipH+flipV, and 90/225/270/315 are exact flips of these
+# three plus 0 (md_src/sonic.c's orientation-fold comment has the table).
+ROT_STEPS_UNITS = [64, 128, 192]   # 45, 90, 135 degrees
+# Tile-byte budget for assets/sonic/rot_tiles.bin: sh_src/mars.ld's sonicrot
+# region is 0x2C000 (176,128 + 4,096 spare); this is the region size minus
+# that spare, so a build that fits here is guaranteed to link.
+ROT_TILE_BUDGET = 0x2B000
 
 
 class Sheet:
@@ -136,6 +165,148 @@ def enum_name(name):
     return "ANI_" + name.upper().replace(" ", "_")
 
 
+def emit_frame_pieces(pixel_grid, w, h, tiles_buf, pieces_buf):
+    """Split a w x h palette-index grid (row-major list of lists, index 0
+    transparent) into the piece-chunked tile format sonic_frames/
+    sonic_pieces use (and, for rotated frames, sonic_rot_frames/
+    sonic_rot_pieces share): pad to a multiple of 8, walk 4x4-tile chunks,
+    emit one piece per nonempty chunk's trimmed bounding box, tiles
+    column-major within a piece so one DMA loads the frame. Appends into
+    tiles_buf/pieces_buf in place; returns
+    (tileOffset, pieceOffset, tileCount, pieceCount). Factored out of the
+    per-base-frame loop below so the rotated-frame baking pass can reuse the
+    exact same chunking rule without drifting from it."""
+    gw, gh = -(-w // 8) * 8, -(-h // 8) * 8
+    tw, th = gw // 8, gh // 8
+
+    grid = [[0] * gw for _ in range(gh)]
+    for y in range(h):
+        row = pixel_grid[y]
+        for x in range(w):
+            grid[y][x] = row[x]
+
+    frame_tile_offset = len(tiles_buf) // 32
+    frame_piece_offset = len(pieces_buf)
+    local_tiles = 0
+
+    for cx0 in range(0, tw, 4):
+        for cy0 in range(0, th, 4):
+            cols = range(cx0, min(cx0 + 4, tw))
+            rows_ = range(cy0, min(cy0 + 4, th))
+            used = [(tx, ty) for ty in rows_ for tx in cols
+                    if not tile_empty(tile_at(grid, tx, ty))]
+            if not used:
+                continue
+            minx = min(t[0] for t in used); maxx = max(t[0] for t in used)
+            miny = min(t[1] for t in used); maxy = max(t[1] for t in used)
+            pw, ph = maxx - minx + 1, maxy - miny + 1
+
+            piece_tile = local_tiles
+            for tx in range(minx, maxx + 1):
+                for ty in range(miny, maxy + 1):
+                    tiles_buf.extend(pack_tile(tile_at(grid, tx, ty)))
+                    local_tiles += 1
+
+            size = ((pw - 1) << 2) | (ph - 1)
+            pieces_buf.append((minx * 8, miny * 8, size, piece_tile))
+
+    return (frame_tile_offset, frame_piece_offset, local_tiles,
+            len(pieces_buf) - frame_piece_offset)
+
+
+def rotate_grid(grid, w, h, pivotX, pivotY, rot_units):
+    """Nearest-neighbour rotate a w x h palette-index grid (row-major list
+    of lists, index 0 transparent) about the frame's pivot by rot_units
+    (RSDK's 0-511 rotation scale), mirroring RSDKv5's DrawSpriteRotozoom
+    inverse-mapping sampling (dependencies/RSDKv5/RSDKv5/RSDK/Graphics/
+    Drawing.cpp:3515-3690, the draw used whenever FX_ROTATE is set):
+
+    - Nearest-neighbour, floor-truncated to an integer source index, same
+      spirit as Drawing.cpp's FROM_FIXED (a plain right-shift, i.e. floor,
+      not round-to-nearest) -- "mirror its rounding" from this port's own
+      design brief -- but sampled at each destination pixel's CENTRE rather
+      than its corner (see the centre-vs-corner comment inside the sampling
+      loop below for why: corner sampling has a parity bug at exact
+      90-degree steps that silently drops half the source image).
+    - The same forward-rotation direction the renderer's own angle
+      transform produces: angle = 0x200 - (rotation & 0x1FF) unless
+      rotation&0x1FF is 0 (Drawing.cpp:3541-3543), then
+      srcX = destX*cos(angle) - destY*sin(angle),
+      srcY = destX*sin(angle) + destY*cos(angle) (the deltaX/deltaXLen/
+      deltaY/deltaYLen accumulation at Drawing.cpp:3644-3667, reduced to its
+      closed form for this port's fixed 1:1 scale and FLIP_NONE direction --
+      scale/direction the live renderer always uses for ROTSTYLE_FULL, since
+      Sonic is never simultaneously scaled while running a loop).
+    - The rotated bounding box comes from the same rule DrawSpriteRotozoom
+      uses for its own posX[]/posY[] (Drawing.cpp:3601-3631): rotate the
+      source rect's four corners forward by rot_units and take the min/max.
+
+    At rot_units == 128 (90 degrees) the trig terms are exactly (0, +-1), so
+    this reduces to a pure transpose+flip, pixel-identical to the source, as
+    called for by this port's design brief; at 64/192 (45/135 degrees) it is
+    ordinary nearest-neighbour sampling.
+
+    Returns (new_grid, new_w, new_h, new_pivotX, new_pivotY), where the
+    output pivot is expressed the same way SonicFrame.pivotX/Y already are:
+    the P-space (pivot-relative) coordinate of the output's own local (0,0)
+    corner, so "top-left drawn at entityX+pivotX" still holds after baking."""
+    # round(..., 9): math.cos/sin of a multiple of pi/2 (our 45-degree steps
+    # always land on one at the 90/180-degree cases the trig terms should be
+    # exactly 0/+-1, per this function's own "90 degrees pixel-exact" claim)
+    # comes back as a ~1e-16 epsilon, not a true zero -- left alone, that
+    # epsilon pushes floor()/ceil() below to the wrong integer and quietly
+    # breaks the exact-transpose case this function exists to get right.
+    # Rounding to 9 decimals clears the epsilon while changing nothing at
+    # 45/135 degrees, whose true values (+-0.70710678...) are nowhere near
+    # an integer boundary.
+    angle_table = (0x200 - (rot_units & 0x1FF)) if (rot_units & 0x1FF) else 0
+    theta = angle_table * (2.0 * math.pi / 512.0)
+    cos_t, sin_t = round(math.cos(theta), 9), round(math.sin(theta), 9)
+
+    rot_deg = rot_units * (360.0 / 512.0)
+    rt = math.radians(rot_deg)
+    rc, rs = round(math.cos(rt), 9), round(math.sin(rt), 9)
+
+    # Source rect's four corners in P-space (P-space = local + pivot, the
+    # same relation SonicFrame.pivotX/Y already encode), rotated forward by
+    # rot_units to bound the output.
+    corners = [(pivotX, pivotY), (pivotX + w, pivotY),
+               (pivotX, pivotY + h), (pivotX + w, pivotY + h)]
+    rx = [rc * cx - rs * cy for cx, cy in corners]
+    ry = [rs * cx + rc * cy for cx, cy in corners]
+
+    out_min_x = math.floor(min(rx))
+    out_min_y = math.floor(min(ry))
+    out_w = math.ceil(max(rx)) - out_min_x
+    out_h = math.ceil(max(ry)) - out_min_y
+
+    # Sample at pixel CENTRES, not the corner RSDK's own FROM_FIXED technically
+    # truncates at: corner-referenced sampling turns out to have a corner-
+    # parity bug at exact 90-degree steps (a destination pixel's top-left
+    # corner does not rotate to a source pixel's top-left corner, so floor()
+    # lands one pixel off along one axis, silently dropping half the source
+    # image instead of the exact bijective transpose this port's design
+    # brief calls for). Centre-referenced sampling is rotation-symmetric --
+    # a pixel's centre always maps to some other pixel's centre under a pure
+    # rotation, with no parity hazard -- and is the standard nearest-
+    # neighbour convention for exactly this reason; it changes nothing at
+    # 45/135 degrees (still ordinary nearest-neighbour) and makes 90 degrees
+    # the exact, lossless transpose+flip by construction rather than by luck.
+    out = [[0] * out_w for _ in range(out_h)]
+    for oy in range(out_h):
+        dest_y = out_min_y + oy + 0.5
+        for ox in range(out_w):
+            dest_x = out_min_x + ox + 0.5
+            src_px = cos_t * dest_x - sin_t * dest_y
+            src_py = sin_t * dest_x + cos_t * dest_y
+            sx = math.floor(src_px - pivotX)
+            sy = math.floor(src_py - pivotY)
+            if 0 <= sx < w and 0 <= sy < h:
+                out[oy][ox] = grid[sy][sx]
+
+    return out, out_w, out_h, out_min_x, out_min_y
+
+
 def main():
     if len(sys.argv) < 4:
         raise SystemExit(__doc__.strip().splitlines()[-1])
@@ -194,48 +365,79 @@ def main():
 
     for a, fi, f, sh, px in frames:
         w, h = f.w, f.h
-        gw, gh = -(-w // 8) * 8, -(-h // 8) * 8
-        tw, th = gw // 8, gh // 8
+        raw_grid = [[px_index(sh, px[y * w + x]) for x in range(w)] for y in range(h)]
 
-        grid = [[0] * gw for _ in range(gh)]
-        for y in range(h):
-            base = y * w
-            for x in range(w):
-                grid[y][x] = px_index(sh, px[base + x])
-
-        frame_tile_offset = len(tiles) // 32
-        frame_piece_offset = len(pieces)
-        local_tiles = 0
-
-        for cx0 in range(0, tw, 4):
-            for cy0 in range(0, th, 4):
-                cols = range(cx0, min(cx0 + 4, tw))
-                rows_ = range(cy0, min(cy0 + 4, th))
-                used = [(tx, ty) for ty in rows_ for tx in cols
-                        if not tile_empty(tile_at(grid, tx, ty))]
-                if not used:
-                    continue
-                minx = min(t[0] for t in used); maxx = max(t[0] for t in used)
-                miny = min(t[1] for t in used); maxy = max(t[1] for t in used)
-                pw, ph = maxx - minx + 1, maxy - miny + 1
-
-                piece_tile = local_tiles
-                for tx in range(minx, maxx + 1):
-                    for ty in range(miny, maxy + 1):
-                        tiles.extend(pack_tile(tile_at(grid, tx, ty)))
-                        local_tiles += 1
-
-                size = ((pw - 1) << 2) | (ph - 1)
-                pieces.append((minx * 8, miny * 8, size, piece_tile))
+        frame_tile_offset, frame_piece_offset, local_tiles, piece_count = \
+            emit_frame_pieces(raw_grid, w, h, tiles, pieces)
 
         outer, inner = f.hitboxes[0], f.hitboxes[1]
         frame_rows.append({
             "anim": a.name, "index": fi,
             "tileOffset": frame_tile_offset, "pieceOffset": frame_piece_offset,
-            "tileCount": local_tiles, "pieceCount": len(pieces) - frame_piece_offset,
+            "tileCount": local_tiles, "pieceCount": piece_count,
             "pivotX": f.pivotX, "pivotY": f.pivotY, "duration": f.duration,
             "outer": outer, "inner": inner,
+            # Kept only for animations that need baked rotated art (see
+            # ROTATE_ANIMS above); discarded below once the rotation pass
+            # has consumed it, so it never reaches the summary/emit code.
+            "rawGrid": raw_grid if a.name in ROTATE_ANIMS else None,
+            "w": w, "h": h,
         })
+
+    # 3b. rotated frames (WALK/JOG/RUN/DASH/AIR_WALK only): three baked
+    # orientations per frame -- 45, 90, 135 degrees, RSDK's own
+    # ROTSTYLE_45DEG snap (Drawing.cpp:2703-2704); 180 is flipH+flipV of the
+    # unrotated frame and 225/270/315 are flipH+flipV of these three, both
+    # handled at render time by md_src/sonic.c, not baked here (this port's
+    # design brief).
+    rot_tiles = bytearray()
+    rot_pieces = []
+    rot_frame_rows = []          # 3 consecutive entries per contributing base frame
+    rot_index = [-1] * len(frame_rows)     # base frame index -> first of its 3 entries
+    rot_class = [ROTCLASS_NONE] * len(frame_rows)
+    rot_pivot_bad = []
+
+    for bi, r in enumerate(frame_rows):
+        if r["anim"] in ROT180_ANIMS:
+            rot_class[bi] = ROTCLASS_R180
+        elif r["anim"] in ROTATE_ANIMS:
+            rot_class[bi] = ROTCLASS_FULL
+            rot_index[bi] = len(rot_frame_rows)
+            for units in ROT_STEPS_UNITS:
+                rg, rw, rh, rpx, rpy = rotate_grid(r["rawGrid"], r["w"], r["h"],
+                                                    r["pivotX"], r["pivotY"], units)
+                if not (-128 <= rpx <= 127 and -128 <= rpy <= 127):
+                    rot_pivot_bad.append(
+                        f"{r['anim']} frame {r['index']} @ {units * 360 // 512}deg: "
+                        f"pivot ({rpx},{rpy}) out of int8_t")
+                    rpx = max(-128, min(127, rpx))
+                    rpy = max(-128, min(127, rpy))
+                tOff, pOff, tCount, pCount = emit_frame_pieces(rg, rw, rh, rot_tiles, rot_pieces)
+                rot_frame_rows.append({
+                    "anim": r["anim"], "index": r["index"], "deg": units * 360 // 512,
+                    "tileOffset": tOff, "pieceOffset": pOff,
+                    "tileCount": tCount, "pieceCount": pCount,
+                    "pivotX": rpx, "pivotY": rpy,
+                })
+        # else ROTCLASS_NONE (Skid/Skid Turn/Jump): index stays -1
+        r.pop("rawGrid", None)
+        r.pop("w", None)
+        r.pop("h", None)
+
+    if rot_pivot_bad:
+        for msg in rot_pivot_bad:
+            print(f"  WARNING {msg}")
+        raise SystemExit(f"{len(rot_pivot_bad)} rotated frame(s) out of int8_t pivot range, aborting")
+
+    if len(rot_tiles) > ROT_TILE_BUDGET:
+        raise SystemExit(
+            f"rotated tile data {len(rot_tiles):,} bytes exceeds the "
+            f"{ROT_TILE_BUDGET:,}-byte budget (sh_src/mars.ld's sonicrot "
+            f"region) -- stopping rather than silently dropping animations "
+            f"or shrinking art; see this run's summary for the per-anim "
+            f"breakdown and report back")
+
+    rot_max_pieces_row = max(rot_frame_rows, key=lambda r: r["pieceCount"], default=None)
 
     # 4. animation table: frame ranges into frame_rows, in ANIMATIONS order
     anim_rows = []
@@ -245,10 +447,23 @@ def main():
                           "loop": a.loopIndex, "speed": a.speed})
         first += len(a.frames)
 
-    max_tiles = max(r["tileCount"] for r in frame_rows)
-    max_pieces = max(r["pieceCount"] for r in frame_rows)
+    # SONIC_MAX_FRAME_TILES/SONIC_MAX_PIECES size md_src/sonic.c's per-frame
+    # VRAM window and main.c's sprite-list allocation respectively; both have
+    # to cover whichever frame set (base or rotated) sonic_upload/sonic_build
+    # end up sourcing from for a given display frame, so the true max is
+    # over both tables, not just frame_rows.
     max_tiles_frame = max(frame_rows, key=lambda r: r["tileCount"])
     max_pieces_frame = max(frame_rows, key=lambda r: r["pieceCount"])
+    max_tiles = max_tiles_frame["tileCount"]
+    max_pieces = max_pieces_frame["pieceCount"]
+
+    rot_max_tiles_row = max(rot_frame_rows, key=lambda r: r["tileCount"], default=None)
+    if rot_max_tiles_row and rot_max_tiles_row["tileCount"] > max_tiles:
+        max_tiles = rot_max_tiles_row["tileCount"]
+        max_tiles_frame = rot_max_tiles_row
+    if rot_max_pieces_row and rot_max_pieces_row["pieceCount"] > max_pieces:
+        max_pieces = rot_max_pieces_row["pieceCount"]
+        max_pieces_frame = rot_max_pieces_row
 
     # --- write assets ---
     with open(f"{assetdir}/pal.bin", "wb") as fp:
@@ -345,6 +560,99 @@ extern const uint32_t   sonic_tiles[];
                      f" /* {r['name']} */\n")
         fp.write("};\n")
 
+    # Rotated frames -- tile pixels go to rot_tiles.bin, linked into the SH2
+    # program (sh_src/sonic_rot.s) and read back by the 68000 through the
+    # fixed pointer sonic_rot_tiles_md (md_src/sonic.c), same trick as FG
+    # High's map (sh_src/map_fgh.s / md_src/main.c's ghz_map_fgh_md); the
+    # small per-frame metadata tables below are ordinary 68000-linked C data.
+    with open(f"{assetdir}/rot_tiles.bin", "wb") as fp:
+        fp.write(rot_tiles)
+
+    with open(f"{srcdir}/sonic_rot_data.h", "w") as fp:
+        fp.write(f"""/* Generated by tools/convert_sonic.py. Do not edit by hand. */
+
+#ifndef SONIC_ROT_DATA_H
+#define SONIC_ROT_DATA_H
+
+#include <stdint.h>
+#include "sonic_data.h"
+
+/* Baked rotated Sonic frames: three orientations (45, 90, 135 degrees) per
+ * base frame of WALK/JOG/RUN/DASH/AIR_WALK, the ROTSTYLE_FULL animations
+ * (see tools/convert_sonic.py's ROTATE_ANIMS comment and sh_src/player.h's
+ * rotation field comment). Tile pixels live in assets/sonic/rot_tiles.bin,
+ * linked into the SH2 program (sh_src/sonic_rot.s / sh_src/mars.ld's
+ * sonicrot region) and read by the 68000 through the fixed pointer
+ * sonic_rot_tiles_md (md_src/sonic.c) -- not through sonic_rot_tiles[] the
+ * way sonic_tiles[] is linked in directly, since this data does not fit the
+ * 68000's own 512 KB ROM window alongside everything else (same reasoning
+ * as FG High's map, md_src/main.c's ghz_map_fgh_md comment). */
+
+typedef struct {{
+    uint16_t tileOffset;  /* into sonic_rot_tiles_md, in tiles */
+    uint16_t pieceOffset; /* into sonic_rot_pieces */
+    uint8_t  tileCount;
+    uint8_t  pieceCount;
+    int8_t   pivotX, pivotY;
+}} SonicRotFrame;
+
+/* Per-animation rotation-display class, indexed by the same absolute frame
+ * index sonic_frames[]/COMM_ANIM's frameIndex use (md_src/sonic.c's
+ * orientation-fold comment has the full per-class render rule):
+ *   SONIC_ROTCLASS_NONE  ANI_JUMP/ANI_SKID/ANI_SKID_TURN -- rotation
+ *                         computed (sh_src/player.c) but never displayed,
+ *                         baked ROTSTYLE_NONE in the original sprite sheet.
+ *   SONIC_ROTCLASS_R180   ANI_IDLE/ANI_PUSH/ANI_LOOK_UP/ANI_CROUCH --
+ *                         flipH+flipV of the base frame when dispRot==4,
+ *                         upright otherwise; no baked art (exact pixel op).
+ *   SONIC_ROTCLASS_FULL   ANI_WALK/ANI_JOG/ANI_RUN/ANI_DASH/ANI_AIR_WALK --
+ *                         the 8-orientation fold below, using the 3 baked
+ *                         sets this file's tables carry. */
+enum {{ SONIC_ROTCLASS_NONE, SONIC_ROTCLASS_R180, SONIC_ROTCLASS_FULL }};
+
+extern const uint8_t       sonic_rot_class[SONIC_FRAME_COUNT];
+/* Index into sonic_rot_frames[] of the 45-degree entry for a SONIC_ROTCLASS_
+ * FULL base frame (90 is +1, 135 is +2); -1 for every other frame. */
+extern const int16_t       sonic_rot_index[SONIC_FRAME_COUNT];
+extern const SonicPiece    sonic_rot_pieces[];
+extern const SonicRotFrame sonic_rot_frames[];
+
+#endif
+""")
+
+    with open(f"{srcdir}/sonic_rot_data.c", "w") as fp:
+        fp.write("/* Generated by tools/convert_sonic.py. Do not edit by hand. */\n\n")
+        fp.write('#include "sonic_rot_data.h"\n\n')
+
+        fp.write(f"const uint8_t sonic_rot_class[SONIC_FRAME_COUNT] = {{\n")
+        class_name = {ROTCLASS_NONE: "SONIC_ROTCLASS_NONE", ROTCLASS_R180: "SONIC_ROTCLASS_R180",
+                      ROTCLASS_FULL: "SONIC_ROTCLASS_FULL"}
+        for r, cls in zip(frame_rows, rot_class):
+            fp.write(f"    {class_name[cls]}, /* {r['anim']} frame {r['index']} */\n")
+        fp.write("};\n\n")
+
+        fp.write(f"const int16_t sonic_rot_index[SONIC_FRAME_COUNT] = {{\n")
+        for r, idx in zip(frame_rows, rot_index):
+            fp.write(f"    {idx}, /* {r['anim']} frame {r['index']} */\n")
+        fp.write("};\n\n")
+
+        fp.write("const SonicPiece sonic_rot_pieces[] = {\n")
+        pi = 0
+        for r in rot_frame_rows:
+            for j in range(r["pieceCount"]):
+                dx, dy, size, tile = rot_pieces[pi]
+                fp.write(f"    {{ {dx}, {dy}, {size}, {tile} }},"
+                         f" /* {r['anim']} frame {r['index']} @ {r['deg']}deg piece {j} */\n")
+                pi += 1
+        fp.write("};\n\n")
+
+        fp.write("const SonicRotFrame sonic_rot_frames[] = {\n")
+        for r in rot_frame_rows:
+            fp.write(f"    {{ {r['tileOffset']}, {r['pieceOffset']}, {r['tileCount']}, "
+                     f"{r['pieceCount']}, {r['pivotX']}, {r['pivotY']} }},"
+                     f" /* {r['anim']} frame {r['index']} @ {r['deg']}deg */\n")
+        fp.write("};\n")
+
     # --- summary ---
     tile_count = len(tiles) // 32
     piece_bytes = len(pieces) * 4
@@ -374,6 +682,34 @@ extern const uint32_t   sonic_tiles[];
     for r in anim_rows:
         print(f"    {r['name']:<10} {r['count']:>3} frames  first {r['first']:>3}  "
               f"speed {r['speed']:>4}  loop {r['loop']:>3}")
+
+    print(f"\n  rotated frames (WALK/JOG/RUN/DASH/AIR_WALK, 45/90/135deg):")
+    print(f"    baked frames         {len(rot_frame_rows)}  "
+          f"(48 base frames x 3 orientations)")
+    print(f"    tiles                {len(rot_tiles) // 32}  ({len(rot_tiles):,} bytes)")
+    print(f"    budget               {ROT_TILE_BUDGET:,} bytes "
+          f"(sh_src/mars.ld sonicrot region 0x2C000 minus spare) -- "
+          f"{'OK' if len(rot_tiles) <= ROT_TILE_BUDGET else 'OVER BUDGET'}")
+    print(f"    pieces               {len(rot_pieces)}")
+    if rot_max_tiles_row:
+        print(f"    max tiles/frame      {rot_max_tiles_row['tileCount']}  "
+              f"({rot_max_tiles_row['anim']} frame {rot_max_tiles_row['index']} "
+              f"@ {rot_max_tiles_row['deg']}deg)")
+    if rot_max_pieces_row:
+        print(f"    max pieces/frame     {rot_max_pieces_row['pieceCount']}  "
+              f"({rot_max_pieces_row['anim']} frame {rot_max_pieces_row['index']} "
+              f"@ {rot_max_pieces_row['deg']}deg)"
+              + ("  ** exceeds the 4 pieces this port assumed -- "
+                 "SONIC_MAX_PIECES raised, report this **"
+                 if rot_max_pieces_row["pieceCount"] > 4 else ""))
+    print(f"    per-anim tile counts (sum of that anim's 3 orientations x its frame count):")
+    by_anim = {}
+    for r in rot_frame_rows:
+        by_anim.setdefault(r["anim"], []).append(r["tileCount"])
+    for name in ANIMATIONS:
+        if name in by_anim:
+            counts = by_anim[name]
+            print(f"      {name:<10} {sum(counts):>5} tiles over {len(counts):>3} baked frames")
 
 
 if __name__ == "__main__":

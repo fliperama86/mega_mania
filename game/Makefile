@@ -199,3 +199,8 @@ sh_src/map_fgh.o: ../assets/ghz/map_fgh.bin
 # sh_src/collide_b.s), not pulled in by assets.s, so the reassembly
 # dependency belongs on that object file instead.
 sh_src/collide_b.o: ../assets/ghz/collide_b_index.bin ../assets/ghz/collide_b_rows.bin
+
+# rot_tiles.bin (Sonic's baked rotated frames) is the same story again: linked
+# into the SH2 program directly (see sh_src/sonic_rot.s), not pulled in by
+# assets.s, so the reassembly dependency belongs on that object file instead.
+sh_src/sonic_rot.o: ../assets/sonic/rot_tiles.bin

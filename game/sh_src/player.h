@@ -60,6 +60,19 @@ typedef struct {
 	                         * engages for rolling with no extra code. */
 	int16_t controlLock;
 	int16_t skidding;
+	/* self->rotation (Player.c, e.g. Player_HandleGroundRotation/
+	 * Player_HandleAirRotation at Player.c:3207-3254): 0-511 over a full
+	 * turn, RSDK's finer rotation scale for sprite display (double
+	 * player.h's 0-255 angle unit). Computed every frame exactly as the
+	 * original does regardless of which animation is playing -- see
+	 * player.c's ground_rotation/air_gravity -- because Player_State_Ground/
+	 * Roll/TubeRoll/TubeAirRoll all call Player_HandleGroundRotation
+	 * unconditionally too. Only comm.c's snap to dispRot (comm.h's COMM6
+	 * repack) and md_src/sonic.c's per-frame rotation-class table decide
+	 * whether a given animation's *display* ever uses this value: ANI_JUMP/
+	 * ANI_SKID/ANI_SKID_TURN are baked ROTSTYLE_NONE in the original sprite
+	 * sheet, so they compute rotation here but never draw rotated. */
+	uint16_t rotation;
 	/* Animation thresholds carry hysteresis, so they are state, not constants */
 	int32_t minJogVelocity, minRunVelocity, minDashVelocity;
 	/* PlaneSwitch_CheckCollisions' other write, alongside e.collisionPlane

@@ -193,6 +193,7 @@ int main(void)
 	uint16_t frameIndex = 0;
 	uint8_t facing = 0;
 	uint8_t drawGroupHigh = 0;
+	uint8_t dispRot = 0;
 	int cdPresent, cdState = 0;
 
 	/* First thing in boot, before anything else might rely on the audio
@@ -233,7 +234,7 @@ int main(void)
 	 * it has anything to draw. Every later call to comm_read_frame is
 	 * non-blocking; this loop is not part of that steady-state protocol. */
 	while (!comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing,
-	                        &drawGroupHigh)) {}
+	                        &drawGroupHigh, &dispRot)) {}
 
 	firstCol = camX >> 4;
 	firstRow = camY >> 4;
@@ -270,7 +271,7 @@ int main(void)
 		/* Non-blocking: on a torn or absent update this just re-delivers
 		 * the previous frame's cached camera/Sonic values. */
 		comm_read_frame(&camX, &camY, &worldX, &worldY, &frameIndex, &facing,
-		                &drawGroupHigh);
+		                &drawGroupHigh, &dispRot);
 
 		/* Stream every row and column that just entered view. The plane is
 		 * only VIEW_BLOCKS_X by VIEW_BLOCKS_Y and wraps in both axes, so each
@@ -318,7 +319,7 @@ int main(void)
 		 * already left list[sparkleCount-1].link == sparkleCount, pointing
 		 * at Sonic's first piece here; when sparkleCount is 0 this is
 		 * exactly the original sonic_build(..., list, 0) call, unchanged. */
-		used = sonic_build(frameIndex,
+		used = sonic_build(frameIndex, dispRot,
 		                   worldX - (int16_t)camX,
 		                   worldY - (int16_t)camY,
 		                   facing, drawGroupHigh, &list[sparkleCount], sparkleCount);
@@ -374,7 +375,7 @@ int main(void)
 		 * handler. Safe to call with no CD present: it returns immediately
 		 * unless cd_init() brought one up. */
 		cd_vblank();
-		sonic_upload(frameIndex);
+		sonic_upload(frameIndex, dispRot, facing);
 		vdp_sprites_write(list, total);
 		vdp_hscroll(VDP_PLAN_A, -(int16_t)camX);
 		/* Plane B now carries FG High, streamed from the same firstCol/

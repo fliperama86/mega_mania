@@ -30,6 +30,7 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->camAdjustY = 0;
 	p->controlLock = 0;
 	p->skidding = 0;
+	p->rotation = 0;
 	/* Zone->playerDrawGroup[0], the low group -- see player.h's field
 	 * comment and sh_src/plane_switch.c. */
 	p->drawGroupHigh = 0;
@@ -141,6 +142,42 @@ static void ground_movement(Player *p, uint16_t pad)
 		p->e.onGround = 0;
 		p->e.angle = 0;
 		p->e.collisionMode = CMODE_FLOOR;
+	}
+}
+
+/* Player_HandleGroundRotation (Player.c:3207-3237). Feeds the display-only
+ * rotation this port did not carry until now: comm.h's COMM6 repack snaps
+ * this into a 3-bit dispRot the 68000 uses to pick one of 8 baked
+ * orientations (md_src/sonic.c). Called every grounded frame regardless of
+ * animation -- see player.h's rotation field comment for why ANI_JUMP/
+ * ANI_SKID/ANI_SKID_TURN still run this despite never displaying it. */
+static void ground_rotation(Player *p)
+{
+	if (p->e.angle <= 0x04 || p->e.angle >= 0xFC) {
+		p->rotation = 0;
+	} else {
+		int32_t targetRotation = 0;
+		int32_t rotate, shift;
+
+		if (p->e.angle > 0x10 && p->e.angle < 0xE8)
+			targetRotation = (int32_t)p->e.angle << 1;
+
+		rotate = targetRotation - (int32_t)p->rotation;
+		shift = (abs32(p->e.groundVel) <= 0x60000) + 1;
+
+		if (abs32(rotate) >= abs32(rotate - 0x200)) {
+			if (abs32(rotate - 0x200) < abs32(rotate + 0x200))
+				p->rotation = (uint16_t)(p->rotation + ((rotate - 0x200) >> shift));
+			else
+				p->rotation = (uint16_t)(p->rotation + ((rotate + 0x200) >> shift));
+		} else {
+			if (abs32(rotate) < abs32(rotate + 0x200))
+				p->rotation = (uint16_t)(p->rotation + (rotate >> shift));
+			else
+				p->rotation = (uint16_t)(p->rotation + ((rotate + 0x200) >> shift));
+		}
+
+		p->rotation &= 0x1FF;
 	}
 }
 
@@ -334,14 +371,12 @@ static void roll_deceleration(Player *p, uint16_t pad)
 
 /* Player_HandleAirMovement (Player.c:3255-3272), minus Player_Gravity_True
  * (s_main.c's airborne parameter to camera_update already covers it) and
- * Player_HandleAirRotation/pushing=0 (no sprite-rotation output and no
- * pushing feature in this port -- see state_roll's comment for why nothing
- * here reads a "rotation" field). Used by air_state's full per-frame body
- * below and by the Roll/TubeRoll states' same-frame fall-off-the-ground
- * transition (Player.c:3941-3943, 3980-3982), which call only this much of
- * what air_state does -- not air_state's own friction/animation-switch
- * halves, matching the original calling only Player_HandleAirMovement
- * there, not the full Player_State_Air. */
+ * pushing=0 (no pushing feature in this port). Used by air_state's full
+ * per-frame body below and by the Roll/TubeRoll states' same-frame
+ * fall-off-the-ground transition (Player.c:3941-3943, 3980-3982), which call
+ * only this much of what air_state does -- not air_state's own friction/
+ * animation-switch halves, matching the original calling only
+ * Player_HandleAirMovement there, not the full Player_State_Air. */
 static void air_gravity(Player *p, uint16_t pad)
 {
 	p->e.velY += PHYS_GRAVITY;
@@ -354,6 +389,16 @@ static void air_gravity(Player *p, uint16_t pad)
 	}
 
 	p->e.collisionMode = CMODE_FLOOR;
+
+	/* Player_HandleAirRotation (Player.c:3238-3254), called unconditionally
+	 * at the end of Player_HandleAirMovement, same as here. */
+	if (p->rotation >= 0x100) {
+		if (p->rotation < 0x200) p->rotation += 4;
+		else p->rotation = 0;
+	} else {
+		if (p->rotation > 0) p->rotation -= 4;
+		else p->rotation = 0;
+	}
 }
 
 /* Player_HandleAirFriction (Player.c:3273-3293). Takes its own pad so
@@ -406,13 +451,12 @@ static void air_state(Player *p, uint16_t pad)
 	}
 }
 
-/* Player_State_Roll (Player.c:3932-3958). Player_HandleGroundRotation is not
- * ported: this build's comm protocol (comm.h) has no sprite-rotation field,
- * only an animation-frame index and a direction bit, so nothing downstream
- * of this port could ever read the value RSDK's version computes -- same
- * reasoning as air_gravity dropping Player_HandleAirRotation above. */
+/* Player_State_Roll (Player.c:3932-3958). Player_HandleGroundRotation runs
+ * first, exactly where the original calls it (Player.c:3936, before
+ * HandleRollDeceleration) -- see player.h's rotation field comment. */
 static void state_roll(Player *p, uint16_t pad, uint16_t jumpPress)
 {
+	ground_rotation(p);
 	roll_deceleration(p, pad);
 	p->applyJumpCap = 0;
 
@@ -429,11 +473,14 @@ static void state_roll(Player *p, uint16_t pad, uint16_t jumpPress)
 
 /* Player_State_TubeRoll (Player.c:3959-3994). No jumpPress check anywhere in
  * this function: the original never reads self->jumpPress in this state
- * either -- tube rolling cannot jump. Player_HandleGroundRotation not ported,
- * see state_roll's comment. */
+ * either -- tube rolling cannot jump. Player_HandleGroundRotation runs first,
+ * before the controlLock masking below, exactly where Player.c:3963 calls it
+ * (ahead of its own left/right save-and-restore at 3965-3971). */
 static void state_tube_roll(Player *p, uint16_t pad)
 {
 	uint16_t maskedPad = pad;
+
+	ground_rotation(p);
 
 	if (p->controlLock > 0) {
 		maskedPad = (uint16_t)(pad & ~(PAD_LEFT | PAD_RIGHT));
@@ -454,10 +501,13 @@ static void state_tube_roll(Player *p, uint16_t pad)
 }
 
 /* Player_State_TubeAirRoll (Player.c:3995-4025). Player_HandleGroundRotation
- * not ported, see state_roll's comment. */
+ * runs first, exactly where Player.c:3999 calls it (the function's very
+ * first line, ahead of its own controlLock masking below). */
 static void state_tube_air(Player *p, uint16_t pad)
 {
 	uint16_t maskedPad = pad;
+
+	ground_rotation(p);
 
 	if (p->controlLock > 0) {
 		maskedPad = (uint16_t)(pad & ~(PAD_LEFT | PAD_RIGHT));
@@ -487,6 +537,9 @@ void player_update(Player *p, uint16_t pad)
 	case PSTATE_TUBE_AIR:  state_tube_air(p, pad); break;
 	default:                /* PSTATE_NORMAL: Player_State_Ground / Air */
 		if (p->e.onGround) {
+			/* Player_State_Ground calls Player_HandleGroundRotation before
+			 * Player_HandleGroundMovement (Player.c:3835-3836). */
+			ground_rotation(p);
 			ground_movement(p, pad);
 			ground_animation(p);
 			if (jumpPress) action_jump(p);

@@ -22,8 +22,15 @@
  * free tile and returns the next one after the window. */
 uint16_t sonic_gfx_init(uint16_t firstTile);
 
-/* Upload the current frame. Call inside vblank. */
-void sonic_upload(uint16_t frameIndex);
+/* Upload the current frame. Call inside vblank. dispRot is the 3-bit snapped
+ * rotation step (0-7) comm_read_frame returns (sh_src/comm.h's COMM6
+ * repack); facing is Player.direction (0 right, 1 left), the same value
+ * sonic_build's flip takes. Both matter here, not just for sonic_build:
+ * for ROTCLASS_FULL frames facing selects which of the 45/135-degree baked
+ * sets is the source (see sonic_build's comment), so uploading with the
+ * wrong facing would DMA the mirror image of what sonic_build's piece
+ * table actually points at. */
+void sonic_upload(uint16_t frameIndex, uint8_t dispRot, uint8_t facing);
 
 /* Fill sprite entries for the current frame at a screen position, linking them
  * so the caller can chain the rest of its list. Returns how many were used.
@@ -31,8 +38,17 @@ void sonic_upload(uint16_t frameIndex);
  * Player.drawGroupHigh (sh_src/player.h), PlaneSwitch_CheckCollisions'
  * other write alongside collisionPlane (PlaneSwitch.c:94-109), the same
  * Zone->playerDrawGroup[0]/[1] mechanism the original uses to draw Sonic
- * above or below FG High. */
-uint16_t sonic_build(uint16_t frameIndex, int16_t sx, int16_t sy, uint8_t flip,
-                     uint8_t drawGroupHigh, VDPSprite *list, uint16_t firstLink);
+ * above or below FG High.
+ *
+ * dispRot picks one of 8 baked orientations per md_src/sonic_rot_data.h's
+ * sonic_rot_class[frameIndex]: ROTCLASS_NONE frames (rolling, skidding)
+ * ignore it; ROTCLASS_R180 frames (idle, push, look up, crouch) flip both
+ * axes when dispRot==4, upright otherwise; ROTCLASS_FULL frames (walk, jog,
+ * run, dash, air walk) fold facing into the step and pick the base frame or
+ * one of the three baked 45/90/135-degree sets, with flips composed on top
+ * -- see this file's resolve_frame() for the exact table. */
+uint16_t sonic_build(uint16_t frameIndex, uint8_t dispRot, int16_t sx, int16_t sy,
+                     uint8_t flip, uint8_t drawGroupHigh, VDPSprite *list,
+                     uint16_t firstLink);
 
 #endif

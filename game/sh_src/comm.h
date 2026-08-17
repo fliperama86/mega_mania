@@ -41,37 +41,54 @@
  *                        one-shot value the same way COMM12 already carries
  *                        the descriptor offset before being reinterpreted.
  *
- *                        Steady state: camera Y in bits [14:0], plus one bit
- *                        COMM_ANIM's word has no room for (see its own entry
- *                        below, which is exactly full): bit [15] is
- *                        Player.drawGroupHigh (player.h), PlaneSwitch's other
- *                        write alongside collisionPlane
+ *                        Steady state: camera Y in bits [11:0], plus two
+ *                        fields COMM_ANIM's word has no room for (see its
+ *                        own entry below, which is exactly full): bits
+ *                        [14:12] are dispRot, the 3-bit snapped sprite
+ *                        rotation (sh_src/player.c's ground_rotation/
+ *                        air_gravity compute Player.rotation, 0-511, exactly
+ *                        like Player_HandleGroundRotation/HandleAirRotation,
+ *                        Player.c:3207-3254; this is that value snapped to
+ *                        one of 8 steps by the engine's own ROTSTYLE_45DEG
+ *                        formula, Drawing.cpp:2703-2704 --
+ *                        dispRot = ((rotation + 0x20) & 0x1C0) >> 6), and
+ *                        bit [15] is Player.drawGroupHigh (player.h),
+ *                        PlaneSwitch's other write alongside collisionPlane
  *                        (PlaneSwitch_CheckCollisions, PlaneSwitch.c:94-109
  *                        -- other->drawGroup = low/high, the mechanism
  *                        Zone->playerDrawGroup[0]/[1] names in the original),
  *                        telling md_src/sonic.c whether to draw Sonic's
  *                        sprite at low or high priority against FG High.
- *                          word = (camY & 0x7FFFu) | ((drawGroupHigh & 1u) << 15);
+ *                          dispRot = ((rotation + 0x20) & 0x1C0) >> 6;
+ *                          word = (camY & 0x0FFFu) | ((dispRot & 7u) << 12)
+ *                                | ((drawGroupHigh & 1u) << 15);
  *
- *                        Bit 15 cannot collide with a legitimate camY value,
- *                        so this is not a stolen coordinate bit: s_main.c
- *                        clamps the published camY every frame to at most
- *                        `cam.boundsB - SCREEN_H` (its limitY), and
- *                        cam.boundsB is eased toward ZoneBounds.cameraBoundsB,
- *                        which starts at the FG layer height in px
- *                        (bounds_init, bounds.c: `g_map_h * 16`) and is only
- *                        ever narrowed further by BoundsMarker entries, never
- *                        widened past the layer. GHZ Act 1's layer is 128
- *                        blocks tall (2048 px); Act 2's 96-block layer
- *                        (docs/green-hill.md) is smaller still. So camY tops
- *                        out in the low thousands for any act this
- *                        converter could plausibly produce, nowhere near bit
- *                        15's value of 32768 -- the invariant, not a
- *                        one-time measurement, is what makes the bit free.
+ *                        Bits [15:12] cannot collide with a legitimate camY
+ *                        value, so none of the four are stolen coordinate
+ *                        bits: s_main.c clamps the published camY every
+ *                        frame to at most `cam.boundsB - SCREEN_H` (its
+ *                        limitY), and cam.boundsB is eased toward
+ *                        ZoneBounds.cameraBoundsB, which starts at the FG
+ *                        layer height in px (bounds_init, bounds.c:
+ *                        `g_map_h * 16`) and is only ever narrowed further by
+ *                        BoundsMarker entries, never widened past the layer.
+ *                        GHZ Act 1's layer is 128 blocks tall (2048 px);
+ *                        Act 2's 96-block layer (docs/green-hill.md) is
+ *                        smaller still. So camY tops out in the low
+ *                        thousands for any act this converter could
+ *                        plausibly produce, comfortably inside 12 bits
+ *                        (4096) and nowhere near bit 15's value of 32768 --
+ *                        the invariant, not a one-time measurement, is what
+ *                        makes the bits free. s_main.c backs this with a
+ *                        one-line boot trap once g_map_h is known (`g_map_h
+ *                        * 16 <= 4096`), so a future stage that broke the
+ *                        invariant hangs at boot instead of silently
+ *                        corrupting dispRot/drawGroupHigh every frame after.
  *                        Slave writes, 68000 reads; the master SH2 (bg.c)
  *                        also reads this register directly for its own
- *                        parallax math and masks the same bit off before
- *                        using camY, since it never needs drawGroupHigh.
+ *                        parallax math and masks camY down to bits [11:0]
+ *                        before using it, since it never needs dispRot or
+ *                        drawGroupHigh.
  *
  *   COMM8  (0x20004028)  Steady state only: Sonic's world X, an int16_t bit
  *                        pattern carried in a uint16_t register. Slave
@@ -148,10 +165,10 @@
  * register," in two different, both-safe ways: COMM6 and COMM12 carry a
  * boot-time role and a steady-state role that never overlap in time (the
  * boot role is fully consumed, once, before the steady-state role is ever
- * written); COMM6's own steady-state role additionally packs two fields
- * (camY, drawGroupHigh) into one word, safe not because the two are
- * temporally separated -- they are both live every steady-state frame --
- * but because an invariant on camY's own range leaves bit 15 with no
+ * written); COMM6's own steady-state role additionally packs three fields
+ * (camY, dispRot, drawGroupHigh) into one word, safe not because they are
+ * temporally separated -- all three are live every steady-state frame --
+ * but because an invariant on camY's own range leaves bits [15:12] with no
  * legitimate value ever to collide with (see COMM6's entry above). That is
  * a different, stronger guarantee than blitbench's bug had: diagnostic
  * writes and joypad reads on COMM8 had no such invariant keeping them
@@ -217,10 +234,13 @@
 
 /* Publish one frame's worth of camera/Sonic state. Called once per observed
  * tick change from s_main.c's game loop, after player_update/path/camera.
- * drawGroupHigh packs into camY's bit 15 (see COMM6's entry above); pass
- * Player.drawGroupHigh (sh_src/plane_switch.c writes it) verbatim. */
+ * drawGroupHigh and rotation pack into camY's bits 15 and [14:12] (see
+ * COMM6's entry above); pass Player.drawGroupHigh (sh_src/plane_switch.c
+ * writes it) and Player.rotation (player.c's ground_rotation/air_gravity)
+ * verbatim -- this function does the ROTSTYLE_45DEG snap to dispRot. */
 void comm_publish_frame(uint16_t camX, uint16_t camY, int16_t worldX, int16_t worldY,
-                         uint16_t frameIndex, uint8_t facing, uint8_t drawGroupHigh);
+                         uint16_t frameIndex, uint8_t facing, uint8_t drawGroupHigh,
+                         uint16_t rotation);
 
 /* Blocks until the 68000 publishes a new tick, then returns the pad byte
  * that arrived atomically with it. */
