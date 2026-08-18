@@ -77,6 +77,14 @@ SHCPPS  = $(wildcard sh_src/*.cpp)
 SHOBJS  = $(SHSS:.s=.o)
 SHOBJS += $(SHCS:.c=.o)
 SHOBJS += $(SHCPPS:.cpp=.o)
+# sh_src/assets_gen.s (tools/gen_assets.py's output) does not exist until
+# that generator has run at least once, so SHSS's wildcard() above can miss
+# it on a clean checkout -- wildcard() expands when Make parses this file,
+# before assets_gen.stamp's rule has had a chance to create it. Added
+# unconditionally rather than trusting the wildcard to see a file that might
+# not exist yet; harmless if the wildcard already found it too, since $^
+# de-duplicates prerequisite lists.
+SHOBJS += sh_src/assets_gen.o
 
 .PHONY: all release debug
 
@@ -150,8 +158,18 @@ $(TARGET).32x: $(TARGET).elf
 	@dd if=temp.32x of=$@ bs=8192 conv=sync
 	@rm -f temp.32x
 
-$(TARGET).elf: $(SHOBJS)
-	$(SHCC) $(SHLDFLAGS) $^ -o $@ $(SHLIBS)
+# sh_src/mars.ld INCLUDEs the two generated linker fragments below at link
+# time; ld reads them fresh off disk (no Make involvement there), so this
+# project's Make graph has to know about that dependency on its own or a
+# stale fragment would silently keep an old bank-1 layout. $(filter %.o,$^)
+# rather than a bare $^ for two reasons: it drops the two .ld fragments back
+# out (they belong on ld's -T script, not its object list) and, since $^
+# already de-duplicates, it also protects against sh_src/assets_gen.o
+# appearing twice in $(SHOBJS) (the wildcard-found copy and this file's own
+# unconditional `SHOBJS += sh_src/assets_gen.o` above) turning into two
+# copies of the same global symbols on the actual link command line.
+$(TARGET).elf: $(SHOBJS) sh_src/mars_gen_mem.ld sh_src/mars_gen_sections.ld
+	$(SHCC) $(SHLDFLAGS) $(filter %.o,$^) -o $@ $(SHLIBS)
 
 # mars_start.s pulls the assembled 68000 program in with .incbin, so it has to
 # be re-assembled whenever that binary changes. Without this the ROM silently
@@ -177,30 +195,76 @@ clean:
 	rm -f $(MDTARGET).bin $(MDTARGET).elf $(MDTARGET).lst
 	rm -f $(CDOBJS) cd_src/cd.bin cd_src/cd.elf
 	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
+	rm -f assets_gen.stamp md_src/assets_gen.h sh_src/assets_gen.s \
+	      sh_src/mars_gen_mem.ld sh_src/mars_gen_sections.ld
 
-# assets.s pulls the converted stage/character data in with .incbin, so it has
-# to be re-assembled whenever that data changes. Without this the ROM silently
-# keeps an old copy, the same trap as md_start.bin above.
-#
-# The empty recipe matters: without it these .bin files would be treated as
-# buildable targets in their own right instead of being left alone as source
-# data, which has cost this project hours before.
-RES := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin) $(wildcard ../assets/ghzbg/*.bin) $(wildcard ../assets/ring/*.bin)
-$(RES): ;
-md_src/assets.o: $(RES)
-
-# map_fgh.bin is the one converted asset that isn't pulled in by assets.s
-# (see sh_src/map_fgh.s): it's linked into the SH2 program instead, so the
-# reassembly dependency belongs on that object file, not on assets.o.
-sh_src/map_fgh.o: ../assets/ghz/map_fgh.bin
-
-# collide_b_index.bin/collide_b_rows.bin (RSDK collision path B) are the same
-# story as map_fgh.bin above: linked into the SH2 program directly (see
-# sh_src/collide_b.s), not pulled in by assets.s, so the reassembly
-# dependency belongs on that object file instead.
+# collide_b_index.bin/collide_b_rows.bin (RSDK collision path B) are linked
+# into the SH2 program directly (see sh_src/collide_b.s), the one converted
+# asset that stays there instead of going through tools/gen_assets.py's
+# manifest below: nothing on the 68000 side ever reaches it (that file's own
+# comment), so it has no reason to spend any of cartridge bank 1 or the
+# 68000's fixed window either -- it just rides the SH2 program's own
+# `rom` region (sh_src/mars.ld) like ordinary linked .rodata. The reassembly
+# dependency belongs on that object file since it isn't pulled in by any
+# generated file.
 sh_src/collide_b.o: ../assets/ghz/collide_b_index.bin ../assets/ghz/collide_b_rows.bin
 
-# rot_tiles.bin (Sonic's baked rotated frames) is the same story again: linked
-# into the SH2 program directly (see sh_src/sonic_rot.s), not pulled in by
-# assets.s, so the reassembly dependency belongs on that object file instead.
-sh_src/sonic_rot.o: ../assets/sonic/rot_tiles.bin
+# tools/gen_assets.py is the single source of truth for every OTHER
+# converted asset: one manifest (that script's own ASSETS list), and every
+# downstream address -- the SH2 linker regions (sh_src/mars_gen_mem.ld,
+# sh_src/mars_gen_sections.ld), the SH2-side .incbin file (sh_src/
+# assets_gen.s) and the 68000-side fixed-pointer header (md_src/
+# assets_gen.h) -- computed from it, never hand-typed. Adding an asset is
+# one line in that script's ASSETS list; nothing here needs to change.
+#
+# It emits all four files on every run, so GNU Make's usual "one recipe, one
+# target" shape does not fit; GNU Make 3.81 (this project's baseline) has no
+# grouped-target syntax (`&:`) to declare that cleanly, so this uses the
+# standard workaround instead: one stamp file the script's recipe touches
+# last (after writing all four real files, so the stamp's mtime is always
+# the newest of the five), and one empty rule per real file naming the stamp
+# as its prerequisite. Make re-stats a prerequisite's mtime AFTER running
+# the rule that produces it, not before, so this correctly lets each real
+# file's OWN mtime (set by the script, not by `touch`) drive whatever
+# compiles or links against it -- the empty recipe never re-invokes the
+# script itself, only the stamp rule does that.
+#
+# The empty recipe on $(ASSET_BINS) matters too, same reasoning as this
+# comment used to carry for assets.s's own $(RES): without it these .bin
+# files would be treated as buildable targets in their own right instead of
+# being left alone as source data, which has cost this project hours before.
+ASSET_BINS := $(wildcard ../assets/ghz/*.bin) $(wildcard ../assets/sonic/*.bin) \
+              $(wildcard ../assets/ghzbg/*.bin) $(wildcard ../assets/ring/*.bin) \
+              $(wildcard ../assets/spring/*.bin) $(wildcard ../assets/signpost/*.bin) \
+              $(wildcard ../assets/obj/*/*.bin)
+$(ASSET_BINS): ;
+
+assets_gen.stamp: ../tools/gen_assets.py $(ASSET_BINS)
+	@echo "GEN assets_gen (tools/gen_assets.py)"
+	@python3 ../tools/gen_assets.py
+	@touch assets_gen.stamp
+
+md_src/assets_gen.h sh_src/assets_gen.s sh_src/mars_gen_mem.ld sh_src/mars_gen_sections.ld: assets_gen.stamp ;
+
+# Every 68000 .c file that reads a bank-1 asset includes md_src/assets_gen.h;
+# this project does not track header dependencies automatically (no -MMD),
+# so each has to be listed explicitly, same discipline as every other
+# incbin/regeneration dependency in this file.
+md_src/main.o md_src/descriptor.o md_src/sonic.o md_src/springs.o md_src/signpost.o md_src/rings.o: md_src/assets_gen.h
+# BADNIKS batch: motobug.c/crabmeat.c/buzzbomber.c/chopper.c/newtron.c/
+# batbrain.c/badnik_base.c all read their own class's bank-1 scene table
+# and tile sheet through the same generated header -- same "no -MMD, list
+# it by hand" discipline as every entry above.
+md_src/motobug.o md_src/crabmeat.o md_src/buzzbomber.o md_src/chopper.o md_src/newtron.o md_src/batbrain.o md_src/badnik_base.o: md_src/assets_gen.h
+
+# springs.c/signpost.c's own sprite-building loops compile much larger under
+# release's default -O3 (aggressive unrolling over their piece loops) than
+# their logic actually needs; -Os here is what let the 68000 program fit
+# back under its fixed 512 KB window once this feature's own tile art (moved
+# to the SH2 side, originally sh_src/obj_tiles.s, now generated bank-1 data
+# via tools/gen_assets.py) still left the code itself too big to fit
+# alongside everything else already linked there. Kept even though every
+# asset has since moved out of this program's window (so the ROOT cause of
+# the old budget pressure is gone): not worth relitigating a working -Os
+# choice as part of this layout refactor.
+md_src/springs.o md_src/signpost.o: MDEXTRA := -Os -flto -fuse-linker-plugin

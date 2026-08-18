@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "path.h"
 #include "trig.h"
+#include "breakablewall.h"
 
 /* Ported from RSDK Collision.cpp: FindFloorPosition, FindLWallPosition,
  * FindRoofPosition, FindRWallPosition, SetPathGripSensors, ProcessPathGrip
@@ -38,10 +39,12 @@
 extern const uint16_t *g_ghz_map;
 /* FG High (loop fronts, overhangs): unlike g_ghz_map above, this is not
  * reached through the descriptor table and md_addr_to_sh2() -- it is not
- * linked into the 68000 program at all. sh_src/map_fgh.s links it straight
- * into this SH2 program's own image, at the fixed address sh_src/mars.ld's
- * maphigh region gives it, so it is an ordinary linked array here, resolved
- * by this link the same way any other extern is. */
+ * linked into the 68000 program at all. This SH2 program's own generated
+ * sh_src/assets_gen.s (tools/gen_assets.py's manifest, the ghz_map_fgh
+ * entry's sh_link_name) links it straight into this program's own image, at
+ * the fixed address its `bank1` region gives it (sh_src/mars_gen_mem.ld),
+ * so it is an ordinary linked array here, resolved by this link the same
+ * way any other extern is. */
 extern const uint16_t ghz_map_fgh[];
 /* collide_index[block] is a row number into collide_rows; convert_stage.py
  * dedups identical 70-byte rows (many blocks -- different tiles, or flip
@@ -122,6 +125,7 @@ static int32_t iabs(int32_t v)
 
 static uint16_t cell_at(const uint16_t *map, int32_t cx, int32_t cy)
 {
+	int32_t bx, by;
 	/* g_map_w/g_map_h are uint16_t, but every operand here promotes to
 	 * this build's 32-bit int (confirmed: no -mshort on either CPU)
 	 * before the multiply, same as cx/cy already were, so the row*width
@@ -130,7 +134,25 @@ static uint16_t cell_at(const uint16_t *map, int32_t cx, int32_t cy)
 	 * so the bounds check needs no map-specific variant. */
 	if (cx < 0 || cy < 0 || cx >= g_map_w * CELL_SIZE || cy >= g_map_h * CELL_SIZE)
 		return 0;
-	return map[(cy / CELL_SIZE) * g_map_w + (cx / CELL_SIZE)];
+	bx = cx / CELL_SIZE;
+	by = cy / CELL_SIZE;
+
+	/* sh_src/breakablewall.h's own hook: every ground/air/wall finder in
+	 * this file funnels through this one function (this file's own top
+	 * comment), so this is the single choke point a broken BreakableWall's
+	 * own footprint needs to intercept -- report the map's own "out of
+	 * range" empty sentinel (0, same value the bounds check above already
+	 * returns) instead of the ROM's still-solid value, on both plane-0
+	 * (g_ghz_map, FG Low) and plane-1 (ghz_map_fgh, FG High) reads;
+	 * `map == ghz_map_fgh` is a plain pointer-identity compare against
+	 * that array's own base (decays the same way any array name does),
+	 * distinguishing which of the two physical tables this particular call
+	 * is reading -- a different axis from `plane` (PathEntity.
+	 * collisionPlane, path A/B), see breakablewall.h's own header comment. */
+	if (breakablewall_solid_override(bx, by, (uint8_t)(map == ghz_map_fgh ? 1 : 0)))
+		return 0;
+
+	return map[by * g_map_w + bx];
 }
 
 /* collide_index[block] is a row number into collide_rows, one indirection

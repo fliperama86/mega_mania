@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "player.h"
 #include "trig.h"
+#include "comm.h"
 
 /* Filled in by assets_init() (assets.c); see sonic_anim.c, which reads
  * frame/anim data through the same pointer. */
@@ -31,12 +32,16 @@ void player_init(Player *p, int32_t x, int32_t y)
 	p->controlLock = 0;
 	p->skidding = 0;
 	p->rotation = 0;
+	p->blinkTimer = 0;
+	p->hidden = 0;
+	p->respawnPending = 0;
 	/* Zone->playerDrawGroup[0], the low group -- see player.h's field
 	 * comment and sh_src/plane_switch.c. */
 	p->drawGroupHigh = 0;
 	p->minJogVelocity = 0x40000;
 	p->minRunVelocity = 0x60000;
 	p->minDashVelocity = 0xC0000;
+	p->animationReserve = ANI_WALK;
 	sonic_set_anim(&p->animator, ANI_IDLE, 1, 0);
 }
 
@@ -357,10 +362,14 @@ static void roll_deceleration(Player *p, uint16_t pad)
 	} else if (p->state == PSTATE_TUBE_ROLL) {
 		if (abs32(p->e.groundVel) < 0x10000)
 			/* self->direction & FLIP_Y (Player.c:3509) is always 0 here: the
-			 * only site that ever sets that bit on the PLAYER's direction is
-			 * the death-state branch at Player.c:190-193, and this port has
-			 * no death state (see this file's top-of-file comment), so the
-			 * relaunch is always the else arm below, +PHYS_TUBE_LAUNCH_SPEED. */
+			 * only site that ever sets that bit on the PLAYER's direction in
+			 * the original is the death-state setup at Player.c:190-193, and
+			 * this port's direction field (player.h) never carries a FLIP_Y
+			 * bit at all -- 0/1 facing only, an unconditional reduction, not
+			 * one that depends on whether a death state exists (this port
+			 * has one now: player_kill()/state_death() never touch
+			 * direction either) -- so the relaunch is always the else arm
+			 * below, +PHYS_TUBE_LAUNCH_SPEED. */
 			p->e.groundVel = PHYS_TUBE_LAUNCH_SPEED;
 	} else if ((p->e.groundVel >= 0 && initialVel <= 0)
 	           || (p->e.groundVel <= 0 && initialVel >= 0)) {
@@ -427,6 +436,17 @@ static void air_state(Player *p, uint16_t pad)
 {
 	air_friction(p, pad);
 	air_gravity(p, pad);
+
+	/* Player_State_Air, Player.c:3889-3897: past the apex (velocity.y>0),
+	 * a spring-pose animation reverts to whatever was reserved when the
+	 * spring triggered (sh_src/spring.c's vertical/diagonal effects). The
+	 * ANI_SPRING_CS branch (Player.c:3894-3896) is not ported: this port
+	 * has no cutscene-spring animation (see tools/convert_sonic.py's
+	 * ANIMATIONS list). */
+	if (p->e.velY > 0) {
+		if (p->animator.anim == ANI_SPRING_TWIRL || p->animator.anim == ANI_SPRING_DIAGONAL)
+			sonic_set_anim(&p->animator, p->animationReserve, 0, 0);
+	}
 
 	switch (p->animator.anim) {
 	case ANI_IDLE:
@@ -523,6 +543,127 @@ static void state_tube_air(Player *p, uint16_t pad)
 		p->state = PSTATE_TUBE_ROLL;   /* self->state = Player_State_TubeRoll; */
 }
 
+/* Player_CheckAttacking/Player_CheckAttackingNoInvTimer, see player.h's own
+ * comment on this function for the exact reduction. */
+uint8_t player_is_attacking(const Player *p)
+{
+	return p->animator.anim == ANI_JUMP;
+}
+
+/* Player_Hurt/Player_HurtFlip + Player_Hit, see player.h's own comment for
+ * the full transcription notes and the 0-rings-death rule. */
+uint8_t player_hit(Player *p, int32_t hazardWorldX)
+{
+	if (p->state == PSTATE_HURT || p->state == PSTATE_DEATH || p->blinkTimer > 0)
+		return 0;
+
+	/* Player_Hit's hurtType decision, Player.c:3572: `hurtType =
+	 * (player->rings <= 0) + PLAYER_HURT_RINGLOSS` -- 0 rings selects
+	 * PLAYER_HURT_DIE instead of the HASSHIELD/RINGLOSS knockback below.
+	 * comm_has_rings() (sh_src/comm.h/comm.c) is this port's substitute for
+	 * player->rings: the SH2 never sees the real count, only this one bit
+	 * published from md_src/rings.c's counter every 68000 vblank. The DIE
+	 * branch (Player.c:3624-3626) only sets deathType; this port's
+	 * player_kill() already carries that branch's full death setup (see
+	 * its own comment), so it is called directly here instead of a
+	 * deathType flag threaded through another tick. */
+	if (!comm_has_rings()) {
+		player_kill(p);
+		return 1;
+	}
+
+	/* Player_Hurt, Player.c:2401: `player->position.x > entity->position.x
+	 * ? 0x20000 : -0x20000` -- away from the hazard. */
+	p->e.velX = (p->e.x > hazardWorldX) ? PHYS_HURT_KNOCKBACK_X : -PHYS_HURT_KNOCKBACK_X;
+
+	/* Player_Hit's shared HASSHIELD/RINGLOSS body, Player.c:3587-3611 (both
+	 * branches are physically identical -- see player.h's own comment on
+	 * why this port never distinguishes them). */
+	p->state = PSTATE_HURT;
+	sonic_set_anim(&p->animator, ANI_HURT, 0, 0);
+	p->e.velY = PHYS_HURT_KNOCKBACK_Y;
+	p->e.onGround = 0;
+	p->blinkTimer = PLAYER_BLINK_TIME;
+	p->hidden = 0;
+	p->controlLock = 0;
+	p->skidding = 0;
+	p->applyJumpCap = 0;
+	return 1;
+}
+
+/* Player_State_Hurt (Player.c:4363-4397). Player_Gravity_False/True are
+ * camera-only (see this file's own note on ground_movement's tail for the
+ * same reduction s_main.c already relies on: the camera's dead zone is
+ * driven purely off onGround), so neither is transcribed here. No
+ * underwater branch: this port has no water. */
+static void state_hurt(Player *p)
+{
+	if (p->e.onGround) {
+		p->state = PSTATE_NORMAL;   /* self->state = Player_State_Ground; */
+
+		if (p->e.velX >= -PHYS_HURT_KNOCKBACK_X) {
+			if (p->e.velX <= PHYS_HURT_KNOCKBACK_X) p->e.groundVel = 0;
+			else p->e.groundVel -= PHYS_HURT_KNOCKBACK_X;
+		} else {
+			p->e.groundVel += PHYS_HURT_KNOCKBACK_X;
+		}
+
+		p->controlLock = 0;
+		p->skidding = 0;
+	} else {
+		p->e.velY += PHYS_HURT_GRAVITY;
+		p->skidding = 0;
+	}
+}
+
+/* Player_CheckBadnikBreak's bounce-off, see player.h's own comment. */
+void player_bounce_badnik(Player *p, int32_t hazardWorldY)
+{
+	if (p->e.velY <= 0) {
+		p->e.velY += 0x10000;
+	} else if (p->e.y >= hazardWorldY) {
+		p->e.velY -= 0x10000;
+	} else {
+		p->e.velY = -(p->e.velY + 2 * PHYS_GRAVITY);
+	}
+}
+
+/* Player_Hit's shared death setup plus PLAYER_DEATH_DIE_USESFX, see
+ * player.h's own comment for the exact reduction. */
+void player_kill(Player *p)
+{
+	if (p->state == PSTATE_DEATH) return;
+
+	p->e.velX = 0;
+	p->e.velY = PHYS_DEATH_POP_Y;
+	p->e.groundVel = 0;
+	p->e.onGround = 0;
+	p->state = PSTATE_DEATH;
+	p->blinkTimer = 0;
+	p->hidden = 0;
+	p->controlLock = 0;
+	p->skidding = 0;
+	p->applyJumpCap = 0;
+	p->respawnPending = 0;
+	sonic_set_anim(&p->animator, ANI_DIE, 1, 0);
+}
+
+/* Player_State_Death (Player.c:4398-4426), minus the superState/blinkTimer-
+ * clear/camera-pin/sidekick branches this port has none of (see player.h's
+ * own comment on player_kill for the full list). The camera-pin skip is a
+ * real, if minor, visual deviation: the original stops the dying Sonic from
+ * outrunning the camera downward (Player.c:4416-4421); this port's camera
+ * (sh_src/camera.c) has no equivalent hook from player.c, so the fall can
+ * run slightly ahead of the camera's own follow lag before respawn fires. */
+static void state_death(Player *p)
+{
+	p->e.velX = 0;
+	p->e.velY += PHYS_GRAVITY;
+	sonic_set_anim(&p->animator, ANI_DIE, 0, 0);
+
+	if (p->e.velY > PLAYER_DEATH_RESPAWN_VY) p->respawnPending = 1;
+}
+
 void player_update(Player *p, uint16_t pad)
 {
 	static uint16_t prevPad;
@@ -531,10 +672,28 @@ void player_update(Player *p, uint16_t pad)
 
 	prevPad = pad;
 
+	/* Player_Update's blink-timer preamble (Player.c ~88-93), read against
+	 * p->state as it stood at THIS tick's entry -- same ordering as the
+	 * original, which runs this ahead of StateMachine_Run(self->state)
+	 * (Player.c:129), before whatever this tick's own state dispatch below
+	 * might do (e.g. player_hit() setting PSTATE_HURT with a fresh
+	 * blinkTimer, which must NOT immediately re-decrement on the very tick
+	 * it was set -- it does not, since this runs first, still seeing last
+	 * tick's state). No else branch needed: blinkTimer only ever starts at
+	 * PLAYER_BLINK_TIME (120, a multiple of 8), so the final tick of the
+	 * countdown (120->...->1->0) always lands on a "visible" phase of the
+	 * bit-4 toggle below, the same reason the original never needs one either. */
+	if (p->state != PSTATE_HURT && p->blinkTimer > 0) {
+		p->blinkTimer--;
+		p->hidden = (p->blinkTimer & 4) ? 1 : 0;
+	}
+
 	switch (p->state) {
 	case PSTATE_ROLL:      state_roll(p, pad, jumpPress); break;
 	case PSTATE_TUBE_ROLL: state_tube_roll(p, pad); break;
 	case PSTATE_TUBE_AIR:  state_tube_air(p, pad); break;
+	case PSTATE_HURT:      state_hurt(p); break;
+	case PSTATE_DEATH:     state_death(p); break;
 	default:                /* PSTATE_NORMAL: Player_State_Ground / Air */
 		if (p->e.onGround) {
 			/* Player_State_Ground calls Player_HandleGroundRotation before
@@ -563,8 +722,19 @@ void player_update(Player *p, uint16_t pad)
 	p->e.inner.right = f->innerRight;
 	p->e.inner.bottom = f->innerBottom;
 
-	if (p->e.onGround) path_grip(&p->e);
-	else path_air(&p->e);
+	if (p->state == PSTATE_DEATH) {
+		/* Player_Hit's deathType setup sets tileCollisions = TILECOLLISION_
+		 * NONE (Player.c:202): the death-fall arc is meant to carry Sonic
+		 * straight through terrain, not snag on a wall or ceiling mid-fall.
+		 * Integrate position directly instead of calling path_grip/path_air
+		 * (both of which run full tile collision unconditionally). */
+		p->e.x += p->e.velX;
+		p->e.y += p->e.velY;
+	} else if (p->e.onGround) {
+		path_grip(&p->e);
+	} else {
+		path_air(&p->e);
+	}
 
 	if (p->e.onGround) p->applyJumpCap = 0;
 
@@ -578,12 +748,12 @@ void player_update(Player *p, uint16_t pad)
 	sonic_process_anim(&p->animator);
 }
 
-/* Zone_HandlePlayerBounds, Left/Right/Bottom boundaries (Zone.c ~568-639).
- * Top and the Death Boundary in between are not ported: this port has no
- * death/respawn state, so the Bottom clamp below stands in for the original
- * falling-off-the-map death, rather than being a literal reading of its rule. */
+/* Zone_HandlePlayerBounds, Left/Right/Death/Bottom boundaries (Zone.c
+ * ~568-639). Top is still not ported (Zone_StageLoad leaves
+ * playerBoundActiveT off and nothing in GHZ1 ever turns it on, same as
+ * before). */
 void player_apply_world_bounds(Player *p, int32_t boundL, int32_t boundR,
-                                int32_t boundB)
+                                int32_t boundB, int32_t deathBoundB)
 {
 	/* Zone.c ~570-585. hitbox->left is a negative extent (outer.left is too,
 	 * same RSDK convention), so negating it first gives a positive offset,
@@ -623,12 +793,34 @@ void player_apply_world_bounds(Player *p, int32_t boundL, int32_t boundR,
 		}
 	}
 
+	/* Zone_HandlePlayerBounds' Death Boundary (Zone.c:618-630): the original
+	 * branches on `Zone->playerBoundsB[playerID] <= Zone->deathBoundary
+	 * [playerID]`, comparing position.y against deathBoundary in that arm or
+	 * against the (possibly marker-narrowed) playerBoundsB itself in the
+	 * else arm. Reduces to a single "position.y > deathBoundB" test here,
+	 * proven rather than assumed: deathBoundsB is this act's cameraBoundsB
+	 * AT STAGE LOAD (bounds_init, before any marker narrows it), and
+	 * bounds.c's own k_markers table never writes playerBoundsB past that
+	 * same load-time value (every BOUNDSMARKER_ANY_Y/ABOVE_Y row's y is
+	 * <= g_map_h*16) -- so "playerBoundsB <= deathBoundary" holds for every
+	 * marker this act has, and the original's other branch,
+	 * `position.y > playerBoundsB`, is unreachable for GHZ1. Once death
+	 * triggers, the original also clears playerBoundActiveB so the ordinary
+	 * floor clamp below stops re-catching the falling player
+	 * (Zone.c:623/628); this port gates that same effect on
+	 * `p->state != PSTATE_DEATH` instead of a persistent flag, since
+	 * PSTATE_DEATH here only ever starts from a kill. */
+	if (p->state != PSTATE_DEATH && p->e.y > deathBoundB)
+		player_kill(p);
+
 	/* Zone.c ~632-639. TO_FIXED(20): 20 pixels, 16.16 fixed. */
+	if (p->state != PSTATE_DEATH) {
 #define WORLD_BOUND_MARGIN_Y (20 << 16)
-	if (p->e.y + WORLD_BOUND_MARGIN_Y > boundB) {
-		p->e.y = boundB - WORLD_BOUND_MARGIN_Y;
-		p->e.velY = 0;
-		p->e.onGround = 1;
-	}
+		if (p->e.y + WORLD_BOUND_MARGIN_Y > boundB) {
+			p->e.y = boundB - WORLD_BOUND_MARGIN_Y;
+			p->e.velY = 0;
+			p->e.onGround = 1;
+		}
 #undef WORLD_BOUND_MARGIN_Y
+	}
 }

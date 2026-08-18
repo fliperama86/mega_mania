@@ -1,6 +1,9 @@
 #include "comm.h"
 
 static uint8_t seq;
+/* Cached by comm_wait_tick() from COMM_TICK's bit [8]; see comm_has_rings()
+ * below and that register's entry in this file's header. */
+static uint8_t s_hasRings;
 
 void comm_publish_frame(uint16_t camX, uint16_t camY, int16_t worldX, int16_t worldY,
                          uint16_t frameIndex, uint8_t facing, uint8_t drawGroupHigh,
@@ -36,10 +39,22 @@ uint16_t comm_wait_tick(void)
 
 	for (;;) {
 		word = COMM_TICK;
-		tick = (uint8_t)(word >> 8);
+		/* >> 9 leaves exactly the 7 tick bits (word is 16-bit, so the
+		 * result already fits a uint8_t with no mask needed), same as the
+		 * old >> 8 left exactly the 8 tick bits before this field was
+		 * narrowed (comm.h). */
+		tick = (uint8_t)(word >> 9);
 		if ((int16_t)tick != lastTick) break;
 	}
 	lastTick = (int16_t)tick;
+	/* Cached from the very word that just proved fresh above -- atomic
+	 * with tick and pad, never a second register read (comm.h). */
+	s_hasRings = (uint8_t)((word >> 8) & 1u);
 
 	return (uint16_t)(word & 0xFFu);
+}
+
+uint8_t comm_has_rings(void)
+{
+	return s_hasRings;
 }

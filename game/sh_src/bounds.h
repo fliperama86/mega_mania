@@ -11,9 +11,12 @@
  * original's BoundsMarker_Update (BoundsMarker.c:12-20) feeding
  * Zone->cameraBoundsT/B and Zone->playerBoundsT/B.
  *
- * There is no deathBoundary field: this port has no death/respawn state
- * (see player.c's comment above player_apply_world_bounds), so nothing
- * here needs it. */
+ * deathBoundsB (Zone->deathBoundary, Zone.c:232: `TO_FIXED(Zone->
+ * cameraBoundsB[s])`) is set once, here, at stage load and never touched
+ * again -- k_markers below only ever writes playerBoundsB/cameraBoundsB
+ * (BoundsMarker_Update, Collision.cpp -- the original never routes a
+ * BoundsMarker write through deathBoundary either), matching the original's
+ * own deathBoundary field, which BoundsMarker_ApplyBounds never assigns. */
 typedef struct {
 	int32_t cameraBoundsL, cameraBoundsR; /* px, constant for the act */
 	int32_t cameraBoundsT, cameraBoundsB; /* px, what camera_apply_vbounds
@@ -30,6 +33,13 @@ typedef struct {
 	                                       * this port's player_apply_world_
 	                                       * bounds has no top case either
 	                                       * (see player.h). */
+	int32_t deathBoundsB;                 /* 16.16, constant for the act --
+	                                       * see this struct's own comment
+	                                       * above and player.c's death-
+	                                       * boundary comment for why a
+	                                       * single constant is provably
+	                                       * enough for this act's own
+	                                       * bounds.c marker table. */
 } ZoneBounds;
 
 /* Zone_StageLoad's defaults (Zone.c:221-235): L=0, T=0, R/B from the FG Low

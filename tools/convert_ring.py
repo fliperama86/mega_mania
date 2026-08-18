@@ -312,7 +312,11 @@ def main():
 extern const uint16_t ring_sparkle1_durations[RING_SPARKLE1_MAXFRAME];
 extern const uint16_t ring_sparkle3_durations[RING_SPARKLE3_MAXFRAME];
 
-extern const uint32_t ring_tiles[];
+/* ring_tiles is NOT declared here: it lives in cartridge bank 1 (game/
+ * tools/gen_assets.py's manifest, ASSET_RING_TILES in the generated
+ * game/md_src/assets_gen.h), reached from game/md_src/rings.c through that
+ * generated pointer instead of a linked extern array -- see that file's own
+ * comment. */
 
 #endif
 """)

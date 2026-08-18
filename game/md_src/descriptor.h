@@ -23,12 +23,16 @@
 #define BG_MAP_W 512
 #define BG_MAP_H 24
 
-/* Lets the slave SH2 reach the stage/character assets that are linked into
- * this 68000 program only: ghz_map/ghz_collide_index/ghz_collide_rows
- * (md_src/assets.s's .incbin) and sonic_frames/sonic_anims (md_src/
+/* Lets the slave SH2 reach the stage/character assets it cannot see any
+ * other way: ghz_map/ghz_collide_index/ghz_collide_rows, cartridge bank 1
+ * assets (tools/gen_assets.py's manifest) the 68000 reaches through the
+ * generated pointers in md_src/assets_gen.h, and sonic_frames/sonic_anims,
+ * small compiled tables that stayed linked into this 68000 program (md_src/
  * sonic_data.c's generated array literals). The SH2 has no visibility into
- * this program's symbol table, so it needs the addresses handed to it
- * explicitly; see sh_src/assets.h for the other half of this mechanism.
+ * this program's symbol table or bank 1's generated pointers either, so it
+ * needs the addresses handed to it explicitly; see sh_src/assets.h for the
+ * other half of this mechanism, including how it tells the two kinds of
+ * address in this struct apart.
  *
  * ghz_collide_index/ghz_collide_rows split what used to be one ghz_collide[]
  * array: tools/convert_stage.py now dedups identical 70-byte collision rows
@@ -54,9 +58,9 @@
  * property that makes its own address meaningful to publish as a
  * cartridge-relative offset.
  *
- * bg_pal/bg_blocks/bg_map/bg_lines (tools/convert_bg.py's output, pulled in
- * by md_src/assets.s the same way as ghz_map/ghz_collide_index/
- * ghz_collide_rows above) follow the identical convention: raw addresses,
+ * bg_pal/bg_blocks/bg_map/bg_lines (tools/convert_bg.py's output, bank-1
+ * assets the same way as ghz_map/ghz_collide_index/ghz_collide_rows above)
+ * follow the identical convention: raw addresses,
  * converted through md_addr_to_sh2() the same way. The only difference is
  * who reads them -- the master SH2
  * (sh_src/m_main.c via sh_src/bg.c), not the slave, since the master owns

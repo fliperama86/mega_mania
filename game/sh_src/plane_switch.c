@@ -177,11 +177,8 @@ void plane_switch_apply(Player *p)
 		const PlaneSwitchDef *m = &k_markers[i];
 		int32_t mx = TO_FIXED(m->x);
 		int32_t my = TO_FIXED(m->y);
-		int32_t rx = p->e.x;
-		int32_t ry = p->e.y;
-		int32_t rvx = p->e.velX;
-		int32_t rvy = p->e.velY;
-		uint8_t negAngle = (uint8_t)(0 - m->angle);   /* PlaneSwitch_Create:43 */
+		int32_t rx, ry, rvx, rvy;
+		uint8_t negAngle;
 
 		/* gate: "!self->onPath || other->onGround" (PlaneSwitch.c:91) --
 		 * skip only when onPath demands grounded contact and the player
@@ -189,6 +186,28 @@ void plane_switch_apply(Player *p)
 		 * documents for why this port evaluates every marker every frame
 		 * regardless of on-screen state rather than gating on it. */
 		if (m->onPath && !p->e.onGround) continue;
+
+		/* Cheap, EXACT pre-filter, same derivation as force_spin_apply's
+		 * own (identical) comment: rotation around (mx,my) preserves the
+		 * player's own Euclidean distance from the pivot, so if the
+		 * containment test just below (position only, not velocity --
+		 * PlaneSwitch.c:92) could ever pass, the RAW (unrotated) axis
+		 * distances |p->e.x-mx| and |p->e.y-my| are already individually
+		 * below TO_FIXED(24+halfLen) -- this table's own k_markers is
+		 * hand-transcribed in scene slot order, same as bounds.c's/
+		 * force_spin.c's, so this skips the expensive rotation (BOTH
+		 * calls below -- position AND velocity, four trig-table lookups
+		 * total, paid unconditionally for all MARKER_COUNT=106 entries
+		 * every tick before this change) rather than reordering/windowing
+		 * the table itself. */
+		if (iabs(p->e.x - mx) >= TO_FIXED(24 + m->halfLen)) continue;
+		if (iabs(p->e.y - my) >= TO_FIXED(24 + m->halfLen)) continue;
+
+		rx = p->e.x;
+		ry = p->e.y;
+		rvx = p->e.velX;
+		rvy = p->e.velY;
+		negAngle = (uint8_t)(0 - m->angle);   /* PlaneSwitch_Create:43 */
 
 		rotate_on_pivot(&rx, &ry, mx, my, negAngle);
 		rotate_on_pivot(&rvx, &rvy, 0, 0, negAngle);

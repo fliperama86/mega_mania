@@ -132,17 +132,32 @@
  *                   seq of 0 as "not ready yet" unconditionally, never as
  *                   a consistent frame even if two reads agree on it.
  *       bits [7:1]  absolute frame index into sonic_frames[] (7 bits,
- *                   0-127; the generated table currently has 106 entries,
- *                   comfortably under the limit).
+ *                   0-127; the generated table currently has 124 entries
+ *                   (tools/convert_sonic.py's SONIC_FRAME_COUNT), 3 short of
+ *                   the 127-frame limit. One of the unused values past the
+ *                   real table, SONIC_FRAME_COUNT itself (124), is claimed
+ *                   as a sentinel: "do not draw Sonic this tick", the blink
+ *                   half of post-hit invulnerability (sh_src/player.c's
+ *                   player_hit()/Player.hidden field, sh_src/s_main.c's
+ *                   publish call). This spends none of comm.h's bit/
+ *                   register budget: sonic_frames[] never had this index to
+ *                   begin with, and md_src/sonic.c's sonic_build()/
+ *                   sonic_upload() both bounds-check frameIndex against
+ *                   SONIC_FRAME_COUNT and skip drawing/uploading on exactly
+ *                   this value, the same out-of-range convention md_src/
+ *                   rings.c's own FALLBACK_HITBOX check already established
+ *                   for this field, not a new one. Values 125-127 stay
+ *                   genuinely unused headroom, 3 short of a 10th new pose
+ *                   without any protocol change.
  *       bit  [0]    facing: 0 = right, 1 = left, matching Player.direction.
  *     word = ((uint16_t)seq << 8) | ((frameIndex & 0x7Fu) << 1) | (facing & 1u);
  *
  *     This word is exactly full (8+7+1 = 16 bits): seq needs its full 8 bits
  *     (the seqlock's whole reason to be a uint8_t, not a narrower counter,
  *     is in the paragraph above), and frameIndex's 7 bits are the minimum
- *     for the current 106-entry sonic_frames[] table (106 > 2^6, so 6 bits
- *     is not enough -- "comfortably under the limit" above describes
- *     headroom in the VALUE 106 has against 127, not a spare BIT position).
+ *     for the current 124-entry sonic_frames[] table (124 > 2^6, so 6 bits
+ *     is not enough -- the 3-frame gap to 127 above describes headroom in
+ *     the VALUE 124 has against 127, not a spare BIT position).
  *     drawGroupHigh rides COMM6's bit 15 instead -- see that register's
  *     entry above for why there was room there and not here.
  *
@@ -150,11 +165,45 @@
  *     existing MARS_SYS_COMM14 in mars.h, so this is a wholly new macro,
  *     kept in this file rather than added to mars.h to keep every new
  *     protocol address in one place):
- *     Steady state only: the packed tick+pad word, 68000 writes, slave
+ *     Steady state only: the packed tick+ring+pad word, 68000 writes, slave
  *     reads.
- *       bits [15:8] tick, uint8_t, incremented once per 68000 vblank.
+ *       bits [15:9] tick, 7 bits (0-127), incremented once per 68000
+ *                   vblank, wrapping mod 128. This field is never read as
+ *                   an absolute value -- its one consumer (sh_src/bg.c's
+ *                   g_driftTick/tickDelta, see that file's comment above
+ *                   line_offset() and above tickDelta's own computation)
+ *                   only ever takes an unsigned difference of two samples.
+ *                   That difference is masked to 7 bits (`& 0x7Fu`) before
+ *                   use: while tick occupied a full uint8_t's 0-255 range,
+ *                   plain uint8_t subtraction's own mod-256 wraparound was
+ *                   already exactly the field's wraparound, for free; now
+ *                   that the field's logical modulus (128) is narrower than
+ *                   its uint8_t storage (256), the subtraction needs that
+ *                   explicit mask to keep wrapping correctly through
+ *                   127->0 -- without it, a delta that crosses that
+ *                   boundary comes out wrong by +128. Narrowing tick from 8
+ *                   bits to 7 only changes the wrap period, from 256 real
+ *                   vblanks to 128 (~2.1s at 60Hz instead of ~4.3s), which
+ *                   only matters if the master SH2 (bg.c, a separate CPU
+ *                   from the slave this register is named for) ever falls
+ *                   more than one full wrap period behind the 68000's tick
+ *                   -- a state in which the game is already unplayable,
+ *                   tick delta or not.
+ *                   Narrowing this field is what frees bit [8] below.
+ *       bit  [8]    hasRings: 1 if md_src/rings.c's own ring counter
+ *                   (ringPlayerCount) is nonzero as of this 68000 vblank, 0
+ *                   at exactly zero rings. Not a second ring counter --
+ *                   the only fact sh_src/player.c's player_hit() needs from
+ *                   rings.c's count to transcribe Player_Hit's `hurtType =
+ *                   (player->rings <= 0) + PLAYER_HURT_RINGLOSS`
+ *                   (Player.c:3572): whether the hit should be survivable
+ *                   knockback or an instant kill. Read through
+ *                   comm_has_rings() below, cached from the same word
+ *                   comm_wait_tick() already reads every tick -- not a
+ *                   second register access.
  *       bits [7:0]  the pad byte pad_read() just returned this frame.
- *     word = ((uint16_t)tick << 8) | (pad & 0xFFu);
+ *     word = ((uint16_t)(tick & 0x7Fu) << 9)
+ *          | ((uint16_t)(hasRings & 1u) << 8) | (pad & 0xFFu);
  *
  * Why every field gets its own register: blitbench reports diagnostic
  * results through COMM8, the same register its joypad arrives in, which
@@ -211,20 +260,23 @@
  * fields.
  *
  * 68000 -> slave direction (comm_send_input/comm_wait_tick): the 68000
- * writes the tick+pad word once per its own loop iteration, immediately
+ * writes the tick+ring+pad word once per its own loop iteration, immediately
  * after reading the pad and before anything else that frame, matching where
  * the original single-CPU code called player_update immediately after
  * pad_read, so the phase relationship between "a vblank happened" and
  * "input for that vblank is available" is unchanged. The slave spin-waits
- * for the tick byte to change, extracts the pad byte from the same 16-bit
- * word (atomic together: a single SH2 word load can never observe a new
- * tick paired with a stale pad byte or vice versa), and runs exactly one
- * player_update/collision/camera update per observed tick change. This is
- * the mechanism that keeps physics running at exactly one update per real
- * 60 Hz vblank instead of running as fast as the SH2's loop can spin, which
- * would otherwise silently change gameplay speed: preserving this is
- * required by "do not change any game behaviour" even though nothing named
- * this mechanism directly. */
+ * for the tick field to change, then extracts both the pad byte and the
+ * hasRings bit from that same 16-bit word (atomic together: a single SH2
+ * word load can never observe a new tick paired with a stale pad byte or a
+ * stale hasRings bit, or vice versa), and runs exactly one player_update/
+ * collision/camera update per observed tick change. This is the mechanism
+ * that keeps physics running at exactly one update per real 60 Hz vblank
+ * instead of running as fast as the SH2's loop can spin, which would
+ * otherwise silently change gameplay speed: preserving this is required by
+ * "do not change any game behaviour" even though nothing named this
+ * mechanism directly. comm_wait_tick() returns the pad byte, same as
+ * before; comm_has_rings() below returns the hasRings bit it cached from
+ * the same read. */
 
 /* Post-boot 16-bit views of the two halves of MARS_SYS_COMM12's address
  * range; see the comment above for why these cannot reuse mars.h's existing
@@ -243,7 +295,18 @@ void comm_publish_frame(uint16_t camX, uint16_t camY, int16_t worldX, int16_t wo
                          uint16_t rotation);
 
 /* Blocks until the 68000 publishes a new tick, then returns the pad byte
- * that arrived atomically with it. */
+ * that arrived atomically with it. Also caches the hasRings bit (COMM_TICK
+ * bit [8], see above) from that same word for comm_has_rings() to read --
+ * one word read serves both, never a second register access. */
 uint16_t comm_wait_tick(void);
+
+/* The hasRings bit comm_wait_tick() last cached from COMM_TICK: 1 if
+ * md_src/rings.c's ring counter was nonzero as of the most recently
+ * consumed tick, 0 at exactly zero rings. sh_src/player.c's player_hit()
+ * is the one consumer -- see COMM_TICK's own entry above for why this one
+ * bit is what the 0-rings-death rule needs, not the count itself. Reads 0
+ * before the first comm_wait_tick() call, which is the conservative
+ * default (kills on a hit) rather than the permissive one. */
+uint8_t comm_has_rings(void);
 
 #endif

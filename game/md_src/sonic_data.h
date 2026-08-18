@@ -29,18 +29,22 @@ typedef struct {
     int16_t  speed;
 } SonicAnim;
 
-enum { ANI_IDLE, ANI_WALK, ANI_JOG, ANI_RUN, ANI_DASH, ANI_SKID, ANI_SKID_TURN, ANI_AIR_WALK, ANI_JUMP, ANI_PUSH, ANI_LOOK_UP, ANI_CROUCH, SONIC_ANIM_COUNT };
+enum { ANI_IDLE, ANI_WALK, ANI_JOG, ANI_RUN, ANI_DASH, ANI_SKID, ANI_SKID_TURN, ANI_AIR_WALK, ANI_JUMP, ANI_PUSH, ANI_LOOK_UP, ANI_CROUCH, ANI_SPRING_TWIRL, ANI_SPRING_DIAGONAL, ANI_HURT, ANI_DIE, SONIC_ANIM_COUNT };
 
 #define SONIC_MAX_FRAME_TILES 33
 #define SONIC_MAX_PIECES      4
-#define SONIC_FRAME_COUNT     106   /* rows in hitbox.bin, and the
+#define SONIC_FRAME_COUNT     124   /* rows in hitbox.bin, and the
                                      * valid range of the comm frameIndex
                                      * (sh_src/comm.h's COMM_ANIM bits) */
 
 extern const SonicPiece sonic_pieces[];
 extern const SonicFrame sonic_frames[];
 extern const SonicAnim  sonic_anims[SONIC_ANIM_COUNT];
-extern const uint16_t   sonic_pal[16];
-extern const uint32_t   sonic_tiles[];
+
+/* sonic_pal/sonic_tiles are NOT declared here: they live in cartridge bank 1
+ * (game/tools/gen_assets.py's manifest, ASSET_SONIC_PAL/ASSET_SONIC_TILES in
+ * the generated game/md_src/assets_gen.h), reached from game/md_src/main.c
+ * and game/md_src/sonic.c through that generated pointer instead of a
+ * linked extern array -- see those files' own comments. */
 
 #endif

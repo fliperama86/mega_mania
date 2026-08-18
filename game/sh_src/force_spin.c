@@ -104,9 +104,35 @@ void force_spin_apply(Player *p)
 		const ForceSpinDef *m = &k_markers[i];
 		int32_t mx = TO_FIXED(m->x);
 		int32_t my = TO_FIXED(m->y);
-		int32_t rx = p->e.x;
-		int32_t ry = p->e.y;
-		uint8_t negAngle = (uint8_t)(0 - m->angle);   /* ForceSpin_Create:75 */
+		int32_t rx, ry;
+		uint8_t negAngle;
+
+		/* Cheap, EXACT pre-filter -- not an approximation, not a "camera
+		 * window" (this table is hand-transcribed in scene slot order, not
+		 * x-sorted, see bounds.c's own comment on why THAT table cannot
+		 * safely be binary-searched; this file needs no such reordering to
+		 * still cut its own real cost, which is rotate_on_pivot()'s two
+		 * trig-table lookups below, paid unconditionally for all
+		 * MARKER_COUNT entries every tick before this change regardless of
+		 * distance). Rotation around (mx,my) is a rigid transform, so it
+		 * preserves the player's own Euclidean distance FROM the pivot:
+		 * dist(rotated point, pivot) == dist((p->e.x,p->e.y), pivot)
+		 * exactly. If the post-rotation containment test below (|rx-mx| <
+		 * TO_FIXED(24) AND |ry-my| < TO_FIXED(halfLen)) could ever pass,
+		 * that distance is strictly < sqrt(24^2+halfLen^2) <= 24+halfLen
+		 * (sqrt(a^2+b^2) <= a+b for a,b>=0), which forces BOTH
+		 * |p->e.x-mx| and |p->e.y-my| individually below that same
+		 * 24+halfLen bound (each axis alone is <= the full distance). So
+		 * the contrapositive -- either raw axis distance at or beyond
+		 * TO_FIXED(24+halfLen) -- proves the rotated test cannot pass,
+		 * with no rotation needed to know it: a lossless skip, not a
+		 * heuristic one. */
+		if (iabs(p->e.x - mx) >= TO_FIXED(24 + m->halfLen)) continue;
+		if (iabs(p->e.y - my) >= TO_FIXED(24 + m->halfLen)) continue;
+
+		rx = p->e.x;
+		ry = p->e.y;
+		negAngle = (uint8_t)(0 - m->angle);   /* ForceSpin_Create:75 */
 
 		rotate_on_pivot(&rx, &ry, mx, my, negAngle);
 

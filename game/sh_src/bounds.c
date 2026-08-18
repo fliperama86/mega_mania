@@ -116,6 +116,12 @@ void bounds_init(ZoneBounds *z, int32_t playerX, int32_t playerY)
 	z->playerBoundsT = z->cameraBoundsT << 16;
 	z->playerBoundsB = z->cameraBoundsB << 16;
 
+	/* Zone.c:232, Zone_StageLoad's own deathBoundary assignment: the act's
+	 * cameraBoundsB BEFORE any marker ever narrows it, so this must be
+	 * captured here, not derived from playerBoundsB/cameraBoundsB later --
+	 * both of those keep changing for the rest of the act. */
+	z->deathBoundsB = z->cameraBoundsB << 16;
+
 	/* BoundsMarker_Create's non-setPos half (BoundsMarker.c:41-44): every
 	 * marker already in the scene applies once against the spawn position
 	 * before the first frame, so the act starts pinned by whichever markers
@@ -130,6 +136,22 @@ void bounds_init(ZoneBounds *z, int32_t playerX, int32_t playerY)
  * by more than its own follow lag, well inside the original's update
  * margin, so evaluating all of k_markers every frame instead of only the
  * on-screen ones cannot change which markers end up active. */
+/* NOT windowed by a binary search (2026-08-18 camera-X gating task), unlike
+ * most of sh_src's other per-tick scene-table scans -- k_markers above is
+ * transcribed by hand in SCENE SLOT order (see this file's own top comment:
+ * "later slot wins where two active markers disagree"), not run through
+ * tools/convert_objects.py's write_scene_table (the x-sorted generic
+ * table writer every OTHER per-tick scan in this batch reads its own table
+ * through). Reordering it by x to binary-search would silently change which
+ * marker wins when two are simultaneously in range -- a real correctness
+ * risk for a table this task's own brief says to leave ungated rather than
+ * risk (sort it into work RAM only if the reordering can be proven safe,
+ * which "later slot wins" here says it cannot, at least not without also
+ * restoring slot order among the surviving candidates, which buys nothing
+ * back: apply_marker() below already rejects a non-candidate in one
+ * subtract+compare, as cheap as any window check could make it, so there is
+ * no meaningful per-entry cost left to cut). 24 entries, all this cheap, is
+ * not worth the risk. */
 void bounds_apply_markers(ZoneBounds *z, int32_t playerX, int32_t playerY)
 {
 	uint32_t i;

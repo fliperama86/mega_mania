@@ -1,6 +1,7 @@
 #include "sonic.h"
 #include "sonic_rot_data.h"
 #include "vdp.h"
+#include "assets_gen.h"
 
 /* Sonic gets the fourth hardware palette; the stage is fitted into the other
  * three, see tools/convert_stage.py. */
@@ -11,18 +12,17 @@
  * forty its sheet would take. */
 static uint16_t vramTile;
 
+/* sonic_tiles used to be `extern const uint32_t sonic_tiles[];` (md_src/
+ * sonic_data.h, resolved against assets.s's own .incbin); that generator no
+ * longer declares it -- see tools/convert_sonic.py's own comment -- since
+ * the data moved to bank 1 (tools/gen_assets.py's manifest) alongside
+ * everything else. */
+static const uint32_t *const sonic_tiles = ASSET_SONIC_TILES;
+
 /* Sonic's baked rotated frames' tile pixels (assets/sonic/rot_tiles.bin,
- * tools/convert_sonic.py), too big for this program's own 512 KB ROM window
- * alongside everything else, so they are linked directly into the SH2
- * program instead (sh_src/sonic_rot.s), at cartridge offset 0x94000. That
- * offset falls in the 68000's banked window (0x900000-0x9FFFFF), which shows
- * bank 0 -- cartridge 0x000000-0x0FFFFF -- at 0xA15104's power-on value, and
- * nothing in this codebase ever writes that register, so the fixed pointer
- * below needs no bank switch to stay valid. This literal, sh_src/mars.ld's
- * sonicrot ORIGIN and sh_src/sonic_rot.s's AT() are a hand-synced trio:
- * change one, change all three -- same convention main.c's ghz_map_fgh_md
- * uses for FG High's map. */
-static const uint32_t *const sonic_rot_tiles_md = (const uint32_t *)0x994000;
+ * tools/convert_sonic.py): one more bank-1 asset now (tools/gen_assets.py's
+ * manifest), same as sonic_tiles above. */
+static const uint32_t *const sonic_rot_tiles_md = ASSET_SONIC_ROT_TILES;
 
 uint16_t sonic_gfx_init(uint16_t firstTile)
 {
@@ -134,6 +134,13 @@ void sonic_upload(uint16_t frameIndex, uint8_t dispRot, uint8_t facing)
 {
 	FrameSource fs;
 
+	/* frameIndex == SONIC_FRAME_COUNT is not a real frame: the slave SH2's
+	 * post-hit invulnerability blink (sh_src/player.c's Player.hidden field,
+	 * published by sh_src/s_main.c) reuses this one out-of-range value, over
+	 * the SAME comm word every other tick, to mean "Sonic is not drawn this
+	 * tick" -- see sh_src/comm.h's COMM_ANIM entry. Nothing to upload. */
+	if (frameIndex >= SONIC_FRAME_COUNT) return;
+
 	/* facing has to match what sonic_build() was/will be called with for
 	 * this same display frame: for ROTCLASS_FULL frames it can select a
 	 * different baked set (45 vs 135 degrees), not just a flip bit -- see
@@ -149,6 +156,11 @@ uint16_t sonic_build(uint16_t frameIndex, uint8_t dispRot, int16_t sx, int16_t s
 	FrameSource fs;
 	const SonicPiece *p;
 	uint16_t i;
+
+	/* See sonic_upload's own comment on this same check: a blink-hidden
+	 * tick draws nothing at all, distinct from every real frame emitting at
+	 * least one piece. */
+	if (frameIndex >= SONIC_FRAME_COUNT) return 0;
 
 	resolve_frame(frameIndex, dispRot, flip, &fs);
 	p = &fs.pieces[fs.pieceOffset];

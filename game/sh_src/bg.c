@@ -343,7 +343,7 @@ static uint16_t line_offset(int row, uint16_t camX)
 	return (uint16_t)(v & (MAP_W_PX - 1));
 }
 
-/* The 68000's own vblank tick (comm.h's COMM_TICK, bits [15:8]): the same
+/* The 68000's own vblank tick (comm.h's COMM_TICK, bits [15:9], 7 bits): the same
  * counter s_main.c's comm_wait_tick() gates every player_update/camera step
  * on, specifically so the slave runs "exactly one update per real 60 Hz
  * vblank instead of running as fast as the SH2's loop can spin" (comm.h's
@@ -503,8 +503,9 @@ static void draw_strip(int l, int row, uint16_t base, uint8_t phase)
 		 * used to write a byte at a time -- one bus cycle per pixel, the
 		 * single biggest cost in the old profile. With phase == 0 (every
 		 * line but the sub-pixel cloud rows) base keeps colInBlock, and so
-		 * n, a multiple of 4, g_bg_blocks is forced 4-aligned in assets.s,
-		 * and dst advances in those same multiples -- the longword path
+		 * n, a multiple of 4, g_bg_blocks is forced 4-aligned by its bank-1
+		 * manifest entry (tools/gen_assets.py's align=4 for bg_blocks), and
+		 * dst advances in those same multiples -- the longword path
 		 * runs for the whole strip, exactly as before phase existed
 		 * (phase == 1 never reaches here -- it dispatches to
 		 * draw_strip_shift1() above, which keeps everything aligned by
@@ -786,8 +787,10 @@ void bg_init(void)
 	/* Seeds g_driftTick's baseline: whatever the 68000 has already ticked
 	 * up to by the time this CPU reaches here, so the first bg_frame() call
 	 * sees a tickDelta of 0 or 1, never a spurious backlog of every tick
-	 * since power-on (see g_driftTick's comment above line_offset()). */
-	g_driftTick = (uint8_t)(COMM_TICK >> 8);
+	 * since power-on (see g_driftTick's comment above line_offset()).
+	 * >> 9 leaves exactly the 7 tick bits (comm.h); the result already
+	 * fits a uint8_t (0-127) with no mask needed. */
+	g_driftTick = (uint8_t)(COMM_TICK >> 9);
 
 	pendingCount = 0;
 }
@@ -809,17 +812,27 @@ void bg_frame(void)
 	uint8_t n = 0, k, worst;
 	int l, row;
 	/* How many real 68000 vblanks actually elapsed since the last call --
-	 * see g_driftTick's comment above line_offset(). Unsigned subtraction
-	 * on two uint8_t tick samples wraps correctly through 255->0 the same
-	 * way comm_wait_tick's own tick comparison does. Normally 1; 0 if this
-	 * loop is running ahead of the real display frame (the bug this guards
-	 * against -- driftAccum simply does not advance that call, capping the
-	 * whole layer's drift rate at the true display rate instead of
-	 * whatever rate Hw32xScreenFlip's bank-select wait happens to return
-	 * at); >1 only if this CPU ever fell behind, in which case the drift
-	 * correctly catches up by that many ticks' worth in one step. */
-	uint8_t tick = (uint8_t)(COMM_TICK >> 8);
-	uint8_t tickDelta = (uint8_t)(tick - g_driftTick);
+	 * see g_driftTick's comment above line_offset(). tick is the 7-bit
+	 * field (comm.h), stored here in a uint8_t that only ever holds 0-127.
+	 * Before COMM_TICK's tick field was narrowed to free bit [8] for the
+	 * ring flag, tick occupied the full 0-255 range of its uint8_t, so
+	 * plain uint8_t subtraction's own mod-256 wraparound was exactly the
+	 * field's own wraparound, and needed no help. Now the field's logical
+	 * modulus (128) is narrower than its storage type's (256), so the
+	 * subtraction is masked down to 7 bits to match: without the & 0x7Fu,
+	 * a delta that crosses the 127->0 wrap comes out wrong by +128 (e.g.
+	 * g_driftTick=125, tick=0 after 3 real advances -- unmasked uint8_t
+	 * subtraction gives 131, not 3; & 0x7Fu brings it back to 3). Deltas
+	 * that do not cross the wrap are unaffected either way, since they are
+	 * already < 128 before the mask. Normally 1; 0 if this loop is running
+	 * ahead of the real display frame (the bug this guards against --
+	 * driftAccum simply does not advance that call, capping the whole
+	 * layer's drift rate at the true display rate instead of whatever rate
+	 * Hw32xScreenFlip's bank-select wait happens to return at); >1 only if
+	 * this CPU ever fell behind, in which case the drift correctly catches
+	 * up by that many ticks' worth in one step. */
+	uint8_t tick = (uint8_t)(COMM_TICK >> 9);
+	uint8_t tickDelta = (uint8_t)((tick - g_driftTick) & 0x7Fu);
 	g_driftTick = tick;
 
 	for (row = 0; row < LAYER_H_PX; row++)

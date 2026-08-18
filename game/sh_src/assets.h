@@ -1,13 +1,15 @@
 #ifndef ASSETS_H
 #define ASSETS_H
 
-/* How the slave SH2 reaches the stage/character assets that are linked into
- * the 68000 program only (ghz_map/ghz_collide_index/ghz_collide_rows via
- * md_src/assets.s's .incbin, sonic_frames/sonic_anims via md_src/
- * sonic_data.c's generated array literals). The assets themselves never move
- * and are never duplicated: this file only resolves runtime pointers to the
- * one copy that lives in the 68000's ROM image, reached through the SH2's
- * own cartridge window. */
+/* How the slave SH2 reaches the stage/character assets it cannot see any
+ * other way: ghz_map/ghz_collide_index/ghz_collide_rows, cartridge bank 1
+ * assets (tools/gen_assets.py's manifest) the 68000 reaches through
+ * generated fixed pointers, and sonic_frames/sonic_anims, small compiled
+ * tables still linked into the 68000 program (md_src/sonic_data.c's
+ * generated array literals). The assets themselves never move and are never
+ * duplicated: this file only resolves runtime pointers to the one copy that
+ * lives in the cartridge image, reached through the SH2's own cartridge
+ * window. */
 
 #include <stdint.h>
 
@@ -38,16 +40,38 @@ typedef struct {
 	uint32_t bg_lines;          /* address of bg_lines[] */
 } AssetDescriptor;
 
-/* The 68000 and the SH2 see the same cartridge flash through two different
- * windows. The 68000's program links at 0x880000 and up, so its own
- * addresses (and every address published to us through the descriptor
- * table) are offsets from that base. The SH2 reaches the identical flash
- * through its own cache-through cartridge window at 0x22000000. Converting
- * one 68000 address into the matching SH2 address is always this one
- * subtraction and addition; every pointer that crosses from the 68000 side
- * must go through this function, never open-coded elsewhere. */
+/* The 68000 and the SH2 see the same cartridge flash through different
+ * windows, and which subtraction/addition converts one into the other now
+ * depends on which of the 68000's TWO windows a given address falls in
+ * (md_src/bank.h):
+ *
+ *  - Its FIXED window, 0x880000-0x8FFFFF, always cartridge 0x000000-
+ *    0x07FFFF: still where this program's own small compiled tables live
+ *    (sonic_frames/sonic_anims, md_src/sonic_data.c -- everything else that
+ *    used to live here moved to bank 1, tools/gen_assets.py's manifest).
+ *  - Its BANKED window, 0x900000-0x9FFFFF, cartridge (bank * 0x100000) and
+ *    up depending which bank is currently selected. Every asset this
+ *    function is ever asked to convert that is NOT one of the two fixed-
+ *    window fields above lives in bank 1, cartridge 0x100000-0x1FFFFF, and
+ *    main.c's boot sequence selects bank 1 exactly once and never switches
+ *    away (md_src/bank.h's own comment) -- so a banked-window address is
+ *    always, structurally, a bank-1 address for as long as this program
+ *    runs, and needs no runtime "which bank is live" check to convert
+ *    correctly.
+ *
+ * The SH2 reaches the identical flash through its own cache-through
+ * cartridge window, base 0x22000000 for cartridge offset 0 -- so a fixed-
+ * window address converts by subtracting 0x880000 (back to cartridge
+ * offset 0) then adding that base, and a banked-window address converts by
+ * subtracting 0x900000 (back to cartridge offset 0 -- of BANK 1, not the
+ * cartridge) then adding 0x22100000 (the SH2 address of cartridge offset
+ * 0x100000, i.e. that base plus bank 1's own cartridge offset). Every
+ * pointer that crosses from the 68000 side must go through this function,
+ * never open-coded elsewhere. */
 static inline const void *md_addr_to_sh2(uint32_t md_addr)
 {
+	if (md_addr >= 0x900000u && md_addr <= 0x9FFFFFu)
+		return (const void *)(md_addr - 0x900000u + 0x22100000u);
 	return (const void *)(md_addr - 0x880000u + 0x22000000u);
 }
 

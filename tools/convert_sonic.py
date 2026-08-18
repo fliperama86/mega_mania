@@ -57,9 +57,14 @@ from rsdk import Pack
 from PIL import Image
 
 ANIMATIONS = ["Idle", "Walk", "Jog", "Run", "Dash", "Skid", "Skid Turn",
-              "Air Walk", "Jump", "Push", "Look Up", "Crouch"]
+              "Air Walk", "Jump", "Push", "Look Up", "Crouch",
+              "Spring Twirl", "Spring Diagonal", "Hurt", "Die"]
 SHEET_DIR = "Data/Sprites/"
 PALETTE_COLOURS = 15   # usable colours; pal.bin entry 0 is transparent
+
+# COMM_ANIM's frameIndex is 7 bits (sh_src/comm.h): the whole exported
+# sonic_frames[] table, base animations plus these two, must stay <= 127.
+MAX_EXPORTED_FRAMES = 127
 
 # Player.c's animator.rotationStyle per animation (not computed here -- it
 # rides each animation's own .ani data in the pack, outside anim.py's parsed
@@ -85,9 +90,13 @@ ROTCLASS_NONE, ROTCLASS_R180, ROTCLASS_FULL = 0, 1, 2
 # three plus 0 (md_src/sonic.c's orientation-fold comment has the table).
 ROT_STEPS_UNITS = [64, 128, 192]   # 45, 90, 135 degrees
 # Tile-byte budget for assets/sonic/rot_tiles.bin: sh_src/mars.ld's sonicrot
-# region is 0x2C000 (176,128 + 4,096 spare); this is the region size minus
-# that spare, so a build that fits here is guaranteed to link.
-ROT_TILE_BUDGET = 0x2B000
+# region is 0x24000 (143,360 + 4,096 spare); this is the region size minus
+# that spare, so a build that fits here is guaranteed to link. Shrunk from
+# the original 0x2C000/0x2B000 when springs/signpost art needed a slice of
+# sonicrot's own unused tail (sh_src/obj_tiles.s's own comment has the byte
+# accounting) -- actual usage today, 113,408 bytes, is comfortably under
+# both the old and the new budget.
+ROT_TILE_BUDGET = 0x23000
 
 
 class Sheet:
@@ -320,6 +329,37 @@ def main():
     byname = {a.name: a for a in spr.animations}
     anims = [byname[n] for n in ANIMATIONS]
 
+    # "verify, don't assume" (this port's own rule): check the pack's own
+    # per-animation rotationFlag (anim.py's Animation.rotationFlag) against
+    # which of the three ROTATE_ANIMS/ROT180_ANIMS/neither bucket each name
+    # is hardcoded into above, rather than trusting that bucketing blind.
+    # Observed values (dumped once against this pack): 0 = ROTSTYLE_NONE,
+    # 1 = ROTSTYLE_FULL, 4 = ROTSTYLE_180DEG -- Spring Twirl/Spring Diagonal
+    # both come back 0 (ROTSTYLE_NONE, same class as Jump/Skid/Skid Turn),
+    # confirmed here rather than assumed from the brief.
+    rot_bad = []
+    for a in anims:
+        if a.name in ROTATE_ANIMS:
+            want = 1
+        elif a.name in ROT180_ANIMS:
+            want = 4
+        else:
+            want = 0
+        if a.rotationFlag != want:
+            rot_bad.append(f"{a.name}: pack rotationFlag={a.rotationFlag}, "
+                            f"this converter assumed {want}")
+    if rot_bad:
+        raise SystemExit("rotationFlag mismatch(es) against this converter's "
+                          "ROTATE_ANIMS/ROT180_ANIMS buckets:\n  " + "\n  ".join(rot_bad))
+
+    total_frames = sum(len(a.frames) for a in anims)
+    if total_frames > MAX_EXPORTED_FRAMES:
+        raise SystemExit(
+            f"{total_frames} exported frames exceeds COMM_ANIM's "
+            f"{MAX_EXPORTED_FRAMES}-frame budget (sh_src/comm.h's 7-bit "
+            f"frameIndex) -- stopping rather than silently truncating; per-"
+            f"animation counts: " + ", ".join(f"{a.name}={len(a.frames)}" for a in anims))
+
     sheets = {name: Sheet(pack.read(SHEET_DIR + name))
               for name in {f.sheet for a in anims for f in a.frames}}
     frames = [(a, fi, f, sheets[f.sheet], sheets[f.sheet].crop(f.x, f.y, f.w, f.h))
@@ -524,8 +564,12 @@ enum {{ {", ".join(enum_name(n) for n in ANIMATIONS)}, SONIC_ANIM_COUNT }};
 extern const SonicPiece sonic_pieces[];
 extern const SonicFrame sonic_frames[];
 extern const SonicAnim  sonic_anims[SONIC_ANIM_COUNT];
-extern const uint16_t   sonic_pal[16];
-extern const uint32_t   sonic_tiles[];
+
+/* sonic_pal/sonic_tiles are NOT declared here: they live in cartridge bank 1
+ * (game/tools/gen_assets.py's manifest, ASSET_SONIC_PAL/ASSET_SONIC_TILES in
+ * the generated game/md_src/assets_gen.h), reached from game/md_src/main.c
+ * and game/md_src/sonic.c through that generated pointer instead of a
+ * linked extern array -- see those files' own comments. */
 
 #endif
 """)

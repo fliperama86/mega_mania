@@ -11,6 +11,18 @@
 #include "comm.h"
 #include "force_spin.h"
 #include "plane_switch.h"
+#include "spring.h"
+#include "platform.h"
+#include "bridge.h"
+#include "collapsingplatform.h"
+#include "spikes.h"
+#include "spikelog.h"
+#include "breakablewall.h"
+#include "itembox.h"
+#include "badnik.h"
+#include "invisible_block.h"
+#include "spin_booster.h"
+#include "corkscrew_path.h"
 
 /* Map size (g_map_w/g_map_h, from assets.h) comes from the descriptor the
  * 68000 publishes at boot, not a local #define: update_scroll's map-
@@ -105,6 +117,76 @@ void s_main(void)
 		 * path-B-only surfaces those cells carry. */
 		plane_switch_apply(&sonic);
 
+		/* Spring (Spring_Update, Spring.c:12-25): the scene's 35 spring
+		 * markers, same "every marker every frame in slot order" shape as
+		 * force_spin_apply/plane_switch_apply above -- RSDK::ProcessObjects
+		 * (Object.cpp:380-383) walks the active entity list by ascending
+		 * slot, the player's own slot sits ahead of every Spring in GHZ1
+		 * (same precedent those two calls already rely on), so a spring's
+		 * Player_CheckCollisionBox/Touch call in the original reads this
+		 * same tick's already-updated player position -- exactly what
+		 * calling this after player_update() reproduces. Order relative to
+		 * force_spin_apply/plane_switch_apply does not matter in GHZ1: no
+		 * spring sits inside a ForceSpin/PlaneSwitch marker's own box, so
+		 * their Player-field writes never contend for the same frame. */
+		spring_apply(&sonic);
+
+		/* Platform/Bridge/CollapsingPlatform (TRAVERSAL batch): platform_apply
+		 * MUST run first among these three -- it owns g_platform_tick's one
+		 * advance-per-tick (sh_src/platform.c's own top comment), which
+		 * bridge_apply/collapsingplatform_apply only ever read. Same "every
+		 * marker every frame, player already settled this tick" shape as
+		 * spring_apply's own comment above; disjoint scene geometry (no GHZ1
+		 * spring/tube/plane-switch marker sits inside a platform/bridge/
+		 * collapsing-platform's own footprint) makes the relative order
+		 * against spring_apply/force_spin_apply/plane_switch_apply safe for
+		 * the same reason spring_apply's own comment gives. */
+		platform_apply(&sonic);
+		bridge_apply(&sonic);
+		collapsingplatform_apply(&sonic);
+
+		/* Hazards and items (HAZARDS batch): Spikes/SpikeLog/BreakableWall/
+		 * ItemBox, each independently re-deriving "is this instance active
+		 * right now" off its own scene table and, for Spikes/SpikeLog, a
+		 * locally-owned tick counter (see sh_src/spikes.c/spikelog.c's own
+		 * header comments) -- same "every marker every frame, player already
+		 * settled this tick" shape as every apply() call above, safe in the
+		 * same relative order for the same disjoint-geometry reason
+		 * spring_apply's own comment gives. */
+		spikes_apply(&sonic);
+		spikelog_apply(&sonic);
+		breakablewall_apply(&sonic);
+		itembox_apply(&sonic);
+
+		/* Badniks (BADNIKS batch, md_src/badnik_base.h's own top comment
+		 * has the full split): six classes' own simplified collision
+		 * models, each independently re-deriving "where is this instance
+		 * right now" off its own tick counter and testing it against
+		 * Sonic's just-updated position -- same "every marker every frame,
+		 * player already settled this tick" shape as every apply() call
+		 * above, and safe in the same relative order for the same reason
+		 * spring_apply's own comment gives (disjoint geometry: no GHZ1
+		 * badnik sits inside a spring/tube/plane-switch marker's own box). */
+		badnik_apply(&sonic);
+
+		/* InvisibleBlock/SpinBooster/CorkscrewPath (Global/InvisibleBlock.c,
+		 * Common/SpinBooster.c, GHZ/CorkscrewPath.c): the scene's remaining
+		 * invisible-logic markers, same "every marker every frame in slot
+		 * order, after player_update() has settled this tick's position"
+		 * shape as every apply() call above -- see each header's own doc
+		 * comment for what each ports and what it cuts. Order relative to
+		 * force_spin_apply/plane_switch_apply/spring_apply above does not
+		 * matter in GHZ1 for the same reason spring_apply's own comment
+		 * gives (no two markers of different classes overlap the same box),
+		 * and a same-frame invisible_block_apply() crush kill is safe to run
+		 * before spin_booster_apply()/corkscrew_path_apply(): player_kill()
+		 * clears onGround, which is itself part of both of those functions'
+		 * own entry conditions, so a just-killed player is naturally skipped
+		 * rather than needing an explicit ordering guard. */
+		invisible_block_apply(&sonic);
+		spin_booster_apply(&sonic);
+		corkscrew_path_apply(&sonic);
+
 		/* BoundsMarker_Update (BoundsMarker.c:12-20): every marker in the
 		 * scene re-checked against the player's current position, in scene
 		 * slot order (bounds.c's table). This port skips the original's
@@ -117,15 +199,32 @@ void s_main(void)
 		 * change which end up active. */
 		bounds_apply_markers(&zb, sonic.e.x, sonic.e.y);
 
-		/* Zone_HandlePlayerBounds's Left/Right/Bottom (Zone.c ~558-640): left
-		 * is 0 now (Zone_StageLoad's default, Zone.c:222 - not GHZSetup's
-		 * Act-2-only 96), right is the layer width in pixels (unchanged),
-		 * bottom is whatever bounds_apply_markers just set. Top is not
+		/* Zone_HandlePlayerBounds's Left/Right/Death/Bottom (Zone.c ~558-640):
+		 * left is 0 now (Zone_StageLoad's default, Zone.c:222 - not
+		 * GHZSetup's Act-2-only 96), right is the layer width in pixels
+		 * (unchanged), bottom is whatever bounds_apply_markers just set,
+		 * deathBoundsB is the act's own un-narrowed floor (bounds_init, never
+		 * touched again -- see bounds.h/player.c's own comments). Top is not
 		 * consumed: Zone_StageLoad leaves playerBoundActiveT off and nothing
 		 * in GHZ1 ever turns it on, so zb.playerBoundsT is maintained
 		 * (BOUNDSMARKER_BELOW_Y does write it) but never read past bounds.h. */
 		player_apply_world_bounds(&sonic, zb.playerBoundsL, zb.playerBoundsR,
-		                           zb.playerBoundsB);
+		                           zb.playerBoundsB, zb.deathBoundsB);
+
+		/* player_kill()'s respawn half: this port has no lives counter, no
+		 * checkpoint/save-point system and no game-over flow (Player_
+		 * HandleDeath's real target, Player.c:1906-2044+, none of which
+		 * exists here) -- so every death simply restarts the player at the
+		 * act's own spawn point, same as a fresh boot. Named deviation, per
+		 * this task's own brief: the original would decrement a life and, on
+		 * a checkpoint-equipped act, resume from the last one crossed; GHZ1
+		 * has neither ported here. player_init() also re-seeds bounds/camera
+		 * below are NOT re-run: the camera eases back onto the respawned
+		 * player from wherever it was, same as the original's own camera
+		 * settling behaviour after a respawn (Camera_State_FollowXY still
+		 * running), not a hard camera snap. */
+		if (sonic.respawnPending)
+			player_init(&sonic, PLAYER_SPAWN_X, PLAYER_SPAWN_Y);
 
 		/* Player_Gravity_True/False (Player.c ~6094-6110): the air path
 		 * holds the camera's vertical dead zone open on every airborne
@@ -180,8 +279,15 @@ void s_main(void)
 		worldX = (int16_t)(sonic.e.x >> 16);
 		worldY = (int16_t)(sonic.e.y >> 16);
 
+		/* Post-hit invulnerability blink (Player_Update's visibility toggle,
+		 * Player.c ~88-93 -- see sh_src/player.h's own comment on Player.
+		 * hidden): SONIC_FRAME_COUNT itself (one past the last real frame)
+		 * is COMM_ANIM's frameIndex sentinel for "do not draw Sonic this
+		 * tick", spending zero new comm.h bits/registers -- see comm.h's
+		 * COMM_ANIM entry and md_src/sonic.c's matching bounds check. */
 		comm_publish_frame(camX, camY, worldX, worldY,
-		                   sonic_anim_frame_index(&sonic.animator), sonic.direction,
-		                   sonic.drawGroupHigh, sonic.rotation);
+		                   sonic.hidden ? SONIC_FRAME_COUNT
+		                                : sonic_anim_frame_index(&sonic.animator),
+		                   sonic.direction, sonic.drawGroupHigh, sonic.rotation);
 	}
 }

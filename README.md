@@ -44,6 +44,8 @@ Convert a stage and the character, then build the game:
     python3 tools/convert_sonic.py /path/to/Data.rsdk assets/sonic game/md_src
     python3 tools/convert_rings.py /path/to/Data.rsdk GHZ assets/ghz
     python3 tools/convert_ring.py /path/to/Data.rsdk assets/ring game/md_src
+    python3 tools/convert_springs.py /path/to/Data.rsdk GHZ assets/ghz
+    python3 tools/convert_spring.py /path/to/Data.rsdk assets/spring assets/signpost game/md_src
     cd game && make
 
 `convert_sonic.py` also writes `game/md_src/sonic_data.{c,h}`, which are
@@ -60,6 +62,19 @@ see that file's own doc comment), unlike everything else in this list.
 `convert_ring.py` reads `assets/ghz/pal.bin` and `assets/sonic/pal.bin` (run
 `convert_stage.py`/`convert_sonic.py` first) to pick which existing CRAM
 line the ring/sparkle art fits best; it does not add a new palette.
+
+`convert_springs.py` writes `assets/ghz/springs.bin`, the scene's spring
+table (same x-sorted shape as `rings.bin`, consumed by `game/md_src/
+springs.c`). `convert_spring.py` writes spring and signpost hardware-sprite
+tiles plus `game/md_src/spring_data.{c,h}`/`signpost_data.{c,h}`; unlike
+every other converted asset, the tile pixels it emits are linked into the
+SH-2 program (`game/sh_src/obj_tiles.s`), not the 68000's, because the
+68000's own 512 KB cartridge window had no room left once springs/signpost
+art joined it -- see `game/md_src/springs.h`/`signpost.h` and `tools/
+convert_spring.py`'s own docstring for the full accounting, including the
+new, brief-exceeding deviations that were needed to fit (springs draw a
+resident pose only, no bounce animation; the signpost's face plate is a
+2-step baked width from a merged Yellow/Red-equivalent palette fit).
 
 Run it:
 

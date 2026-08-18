@@ -1,4 +1,5 @@
 #include "comm.h"
+#include "rings.h"
 
 void comm_boot_publish(uint32_t descriptorOffset, uint16_t screenCenterY)
 {
@@ -6,6 +7,11 @@ void comm_boot_publish(uint32_t descriptorOffset, uint16_t screenCenterY)
 	MD_COMM6  = screenCenterY;
 	MD_COMM2  = 1;
 }
+
+/* File-scope (was a comm_read_frame()-local static): TRAVERSAL batch's
+ * comm_last_seq() below needs to read the same cache comm_read_frame()
+ * already maintains, not a second one -- see comm.h's own comment on why. */
+static int32_t lastSeq = -1;
 
 int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *worldY,
                      uint16_t *frameIndex, uint8_t *facing, uint8_t *drawGroupHigh,
@@ -17,7 +23,6 @@ int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *wo
 	static uint8_t cFacing;
 	static uint8_t cDrawGroupHigh;
 	static uint8_t cDispRot;
-	static int32_t lastSeq = -1;
 	int attempt;
 
 	for (attempt = 0; attempt < 4; attempt++) {
@@ -77,8 +82,18 @@ void comm_send_input(uint16_t pad)
 {
 	static uint8_t tick;
 	uint16_t word;
+	/* rings.c's own counter, not a second one -- see sh_src/comm.h's
+	 * COMM_TICK entry for why only this one bit crosses, not the count. */
+	uint8_t hasRings = rings_collected_count() != 0;
 
-	tick++;
-	word = ((uint16_t)tick << 8) | (pad & 0xFFu);
+	/* Wraps mod 128, matching COMM_TICK's field now being 7 bits wide
+	 * instead of 8 (sh_src/comm.h) -- freeing bit [8] for hasRings. */
+	tick = (uint8_t)((tick + 1) & 0x7Fu);
+	word = ((uint16_t)tick << 9) | ((uint16_t)hasRings << 8) | (pad & 0xFFu);
 	MD_COMM_TICK = word;
+}
+
+uint8_t comm_last_seq(void)
+{
+	return lastSeq >= 0 ? (uint8_t)lastSeq : 0;
 }

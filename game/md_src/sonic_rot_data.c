@@ -109,6 +109,24 @@ const uint8_t sonic_rot_class[SONIC_FRAME_COUNT] = {
     SONIC_ROTCLASS_R180, /* Crouch frame 3 */
     SONIC_ROTCLASS_R180, /* Crouch frame 4 */
     SONIC_ROTCLASS_R180, /* Crouch frame 5 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 0 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 1 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 2 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 3 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 4 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 5 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 6 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 7 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 8 */
+    SONIC_ROTCLASS_NONE, /* Spring Twirl frame 9 */
+    SONIC_ROTCLASS_NONE, /* Spring Diagonal frame 0 */
+    SONIC_ROTCLASS_NONE, /* Spring Diagonal frame 1 */
+    SONIC_ROTCLASS_NONE, /* Hurt frame 0 */
+    SONIC_ROTCLASS_NONE, /* Hurt frame 1 */
+    SONIC_ROTCLASS_NONE, /* Hurt frame 2 */
+    SONIC_ROTCLASS_NONE, /* Hurt frame 3 */
+    SONIC_ROTCLASS_NONE, /* Hurt frame 4 */
+    SONIC_ROTCLASS_NONE, /* Die frame 0 */
 };
 
 const int16_t sonic_rot_index[SONIC_FRAME_COUNT] = {
@@ -218,6 +236,24 @@ const int16_t sonic_rot_index[SONIC_FRAME_COUNT] = {
     -1, /* Crouch frame 3 */
     -1, /* Crouch frame 4 */
     -1, /* Crouch frame 5 */
+    -1, /* Spring Twirl frame 0 */
+    -1, /* Spring Twirl frame 1 */
+    -1, /* Spring Twirl frame 2 */
+    -1, /* Spring Twirl frame 3 */
+    -1, /* Spring Twirl frame 4 */
+    -1, /* Spring Twirl frame 5 */
+    -1, /* Spring Twirl frame 6 */
+    -1, /* Spring Twirl frame 7 */
+    -1, /* Spring Twirl frame 8 */
+    -1, /* Spring Twirl frame 9 */
+    -1, /* Spring Diagonal frame 0 */
+    -1, /* Spring Diagonal frame 1 */
+    -1, /* Hurt frame 0 */
+    -1, /* Hurt frame 1 */
+    -1, /* Hurt frame 2 */
+    -1, /* Hurt frame 3 */
+    -1, /* Hurt frame 4 */
+    -1, /* Die frame 0 */
 };
 
 const SonicPiece sonic_rot_pieces[] = {

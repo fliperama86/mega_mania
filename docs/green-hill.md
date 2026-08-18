@@ -134,6 +134,40 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
       own dedicated MD slots would need `tools/convert_stage.py` changes
       that either blow the 15-colour-per-palette budget or bump other tiles
       into the remap fallback -- not attempted per the stop-and-report rule
+- **Springs and the end-of-act signpost.** Spring physics is slave-SH2-only
+  (`sh_src/spring.c`): a hand-transcribed 35-entry table from GHZ Scene1.bin
+  (Mania filter), applied after `player_update()` in `s_main.c`'s per-tick
+  chain (same slot-order placement `force_spin.c`/`plane_switch.c` already
+  use) via an exact transcription of `Player_CheckCollisionBox` ->
+  `CheckObjectCollisionBox(setValues=true)` for vertical/horizontal springs
+  and `Player_CheckCollisionTouch` plus the velocity-comparison test for
+  diagonal ones, including the C_TOP onGround/groundVel/angle snap and every
+  per-type trigger effect (velocities, hitboxes, `ANI_SPRING_TWIRL`/
+  `ANI_SPRING_DIAGONAL`, `controlLock`). Sonic's two new poses
+  (`tools/convert_sonic.py`'s `ANIMATIONS` list) brought the exported frame
+  total to 118 of the 127 `COMM_ANIM` budget. Drawing is 68000-only
+  (`md_src/springs.c`, `tools/convert_springs.py`'s x-sorted table); the
+  signpost falls and spins (`md_src/signpost.c`, `SignPost_HandleSpin`
+  transcribed directly) at a pre-approved deviated trigger (Sonic's x
+  crossing signpostX-64, no boss) and pre-approved deviated landing Y (the
+  scene's own authored y, picked over an ambiguous tile-collision scan --
+  see `signpost.h`). Getting both to fit originally forced real, NEW,
+  brief-exceeding deviations once every pre-approved one still left the
+  68000 program over its fixed 512 KB cartridge window: springs drew their
+  resident pose only (no bounce animation at all), the signpost's face
+  plate is a 2-step cosine-derived width baked from a merged/best-fit
+  palette (`tools/convert_spring.py`'s own docstring has the full
+  accounting), and every tile pixel for both moved off the 68000 into
+  cartridge bank 1 (`tools/gen_assets.py`'s manifest). The runtime-
+  infrastructure task that added the shared hardware-sprite pool and the
+  table-driven object skeleton (`md_src/obj_generic.h`/`obj_pool.h`) found
+  the 512 KB window had since gained ~484 KB of headroom (moving assets off
+  it, not the code itself, was what mattered) and RESTORED the springs'
+  observational AABB-triggered bounce on top of that skeleton -- see
+  `springs.h`'s own doc comment for the exact trigger/timing derivation.
+  The face-plate step count and merged palette remain real, standing
+  deviations (a VRAM, not ROM-code, constraint). Full numbers in that
+  task's own final report.
 
 ## Next
 
@@ -144,12 +178,14 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 
 ## Known gaps, not yet scheduled
 
-- Springs, badniks, the goal -- rings are done (see above), the rest of
-  GHZ1's objects are not. Still the thing that separates "a zone that runs"
-  from "a zone you play"
-- Ring sound. The original plays `Global/Ring.wav` with alternating left/
-  right pan (`Player_GiveRings`, Player.c) on every collect; this port has no
-  SFX system at all yet, so collecting is silent
+- Remaining roster: SpikeLog 61, Platform 60, Spikes 41, ItemBox 38, badniks
+  and the rest of GHZ1's objects -- rings, springs and the signpost are done
+  (see above); still the thing that separates "a zone that runs" from "a
+  zone you play"
+- No SFX system exists at all yet -- `Global/Spring.wav` (spring bounce) and
+  the signpost's jingle/sfx set (`Global/SignPost.wav`, `Twinkle.wav`,
+  `Slide.wav`, `BubbleBounce.wav`) are silent gaps alongside ring collection
+  (`Player_GiveRings`, Player.c) which was already noted here
 - The 100-rings extra life (`Player_GiveRings`' `ringExtraLife` check,
   Player.c:928-934) is skipped -- there is no lives system to grant into
 - Real HUD. The ring count only exists in the debug overlay text
@@ -169,7 +205,10 @@ Hill, with music, at 60 Hz. Objects are deliberately not in that definition yet.
 
 ## Open questions that need hardware
 
-Everything here runs in ares. The 32X side can be checked on the Neptune; the CD
+Everything here runs in ares, with one partial hardware answer (2026-08-17,
+Neptune via MegaSD): the full build boots, plays and performs well, but
+intermittently resets mid-game -- unattributed between the in-development
+Neptune core and this ROM until original hardware is available. The 32X side can be checked on the Neptune; the CD
 side cannot be checked anywhere, since there is no Mega CD and the MegaSD is
 itself a cartridge (`hardware-budget.md`, section 8).
 

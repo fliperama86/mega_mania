@@ -228,6 +228,43 @@ const SonicPiece sonic_pieces[] = {
     { 0, 0, 15, 0 }, /* Crouch frame 4 piece 0 */
     { 0, 0, 11, 0 }, /* Crouch frame 5 piece 0 */
     { 0, 32, 8, 12 }, /* Crouch frame 5 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 0 piece 0 */
+    { 0, 32, 9, 12 }, /* Spring Twirl frame 0 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 1 piece 0 */
+    { 0, 32, 9, 12 }, /* Spring Twirl frame 1 piece 1 */
+    { 0, 0, 15, 0 }, /* Spring Twirl frame 2 piece 0 */
+    { 0, 32, 9, 16 }, /* Spring Twirl frame 2 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 3 piece 0 */
+    { 0, 32, 5, 12 }, /* Spring Twirl frame 3 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 4 piece 0 */
+    { 0, 32, 5, 12 }, /* Spring Twirl frame 4 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 5 piece 0 */
+    { 0, 32, 5, 12 }, /* Spring Twirl frame 5 piece 1 */
+    { 0, 0, 15, 0 }, /* Spring Twirl frame 6 piece 0 */
+    { 0, 32, 9, 16 }, /* Spring Twirl frame 6 piece 1 */
+    { 0, 0, 15, 0 }, /* Spring Twirl frame 7 piece 0 */
+    { 0, 32, 9, 16 }, /* Spring Twirl frame 7 piece 1 */
+    { 0, 0, 15, 0 }, /* Spring Twirl frame 8 piece 0 */
+    { 0, 32, 9, 16 }, /* Spring Twirl frame 8 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Twirl frame 9 piece 0 */
+    { 0, 32, 9, 12 }, /* Spring Twirl frame 9 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Diagonal frame 0 piece 0 */
+    { 0, 32, 5, 12 }, /* Spring Diagonal frame 0 piece 1 */
+    { 0, 0, 11, 0 }, /* Spring Diagonal frame 1 piece 0 */
+    { 0, 32, 5, 12 }, /* Spring Diagonal frame 1 piece 1 */
+    { 0, 0, 15, 0 }, /* Hurt frame 0 piece 0 */
+    { 0, 0, 15, 0 }, /* Hurt frame 1 piece 0 */
+    { 32, 8, 1, 16 }, /* Hurt frame 1 piece 1 */
+    { 0, 0, 15, 0 }, /* Hurt frame 2 piece 0 */
+    { 32, 0, 3, 16 }, /* Hurt frame 2 piece 1 */
+    { 0, 0, 15, 0 }, /* Hurt frame 3 piece 0 */
+    { 32, 0, 2, 16 }, /* Hurt frame 3 piece 1 */
+    { 0, 0, 15, 0 }, /* Hurt frame 4 piece 0 */
+    { 32, 0, 3, 16 }, /* Hurt frame 4 piece 1 */
+    { 0, 0, 15, 0 }, /* Die frame 0 piece 0 */
+    { 0, 32, 13, 16 }, /* Die frame 0 piece 1 */
+    { 32, 0, 1, 24 }, /* Die frame 0 piece 2 */
+    { 32, 40, 0, 26 }, /* Die frame 0 piece 3 */
 };
 
 const SonicFrame sonic_frames[] = {
@@ -337,6 +374,24 @@ const SonicFrame sonic_frames[] = {
     { 1966, 221, 16, 1, -10, -11, 256, -10, -12, 10, 20, -9, -12, 9, 20 }, /* Crouch frame 3 */
     { 1982, 222, 16, 1, -11, -6, 256, -10, -6, 10, 20, -9, -6, 9, 20 }, /* Crouch frame 4 */
     { 1998, 223, 15, 2, -12, -20, 256, -10, -16, 10, 20, -9, -16, 9, 20 }, /* Crouch frame 5 */
+    { 2013, 225, 18, 2, -11, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 0 */
+    { 2031, 227, 18, 2, -11, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 1 */
+    { 2049, 229, 22, 2, -14, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 2 */
+    { 2071, 231, 16, 2, -9, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 3 */
+    { 2087, 233, 16, 2, -8, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 4 */
+    { 2103, 235, 16, 2, -6, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 5 */
+    { 2119, 237, 22, 2, -13, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 6 */
+    { 2141, 239, 22, 2, -14, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 7 */
+    { 2163, 241, 22, 2, -11, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 8 */
+    { 2185, 243, 18, 2, -14, -22, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Twirl frame 9 */
+    { 2203, 245, 16, 2, -12, -23, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Diagonal frame 0 */
+    { 2219, 247, 16, 2, -12, -23, 256, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Spring Diagonal frame 1 */
+    { 2235, 249, 16, 1, -13, -15, 2, -10, -15, 10, 15, -9, -15, 9, 15 }, /* Hurt frame 0 */
+    { 2251, 250, 18, 2, -15, -15, 2, -10, -15, 10, 15, -9, -15, 9, 15 }, /* Hurt frame 1 */
+    { 2269, 252, 20, 2, -18, -15, 2, -10, -15, 10, 15, -9, -15, 9, 15 }, /* Hurt frame 2 */
+    { 2289, 254, 19, 2, -20, -15, 3, -10, -15, 10, 15, -9, -15, 9, 15 }, /* Hurt frame 3 */
+    { 2308, 256, 20, 2, -20, -15, 256, -10, -15, 10, 15, -9, -15, 9, 15 }, /* Hurt frame 4 */
+    { 2328, 258, 27, 4, -18, -23, 0, -10, -20, 10, 20, -9, -20, 9, 20 }, /* Die frame 0 */
 };
 
 const SonicAnim sonic_anims[SONIC_ANIM_COUNT] = {
@@ -352,4 +407,8 @@ const SonicAnim sonic_anims[SONIC_ANIM_COUNT] = {
     { 82, 10, 0, 1 }, /* Push */
     { 92, 8, 0, 128 }, /* Look Up */
     { 100, 6, 0, 128 }, /* Crouch */
+    { 106, 10, 0, 128 }, /* Spring Twirl */
+    { 116, 2, 0, 128 }, /* Spring Diagonal */
+    { 118, 5, 4, 1 }, /* Hurt */
+    { 123, 1, 0, 0 }, /* Die */
 };

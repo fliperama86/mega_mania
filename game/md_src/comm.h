@@ -15,7 +15,7 @@
 #define MD_COMM10    (*(volatile uint16_t *)0xA1512A) /* steady state: Sonic world Y */
 #define MD_COMM12    (*(volatile uint32_t *)0xA1512C) /* boot only: descriptor offset, 32-bit */
 #define MD_COMM_ANIM (*(volatile uint16_t *)0xA1512C) /* steady state: packed anim word (upper half) */
-#define MD_COMM_TICK (*(volatile uint16_t *)0xA1512E) /* steady state: packed tick+pad word (lower half) */
+#define MD_COMM_TICK (*(volatile uint16_t *)0xA1512E) /* steady state: packed tick(7)+hasRings(1)+pad(8) word (lower half) */
 
 /* Boot only: publishes the descriptor table's cartridge-relative offset and
  * screenCenterY, then raises the ready flag last, in that order. Call once,
@@ -39,9 +39,34 @@ int comm_read_frame(uint16_t *camX, uint16_t *camY, int16_t *worldX, int16_t *wo
                      uint16_t *frameIndex, uint8_t *facing, uint8_t *drawGroupHigh,
                      uint8_t *dispRot);
 
-/* Steady state: bumps the tick counter and publishes it with the pad byte,
- * atomically, in one 16-bit store. Call immediately after pad_read(), before
- * anything else that frame. */
+/* Steady state: bumps the 7-bit tick counter and publishes it, together with
+ * the current hasRings flag (md_src/rings.c's own ring counter, nonzero or
+ * not -- see sh_src/comm.h's COMM_TICK entry) and the pad byte, atomically,
+ * in one 16-bit store. Call immediately after pad_read(), before anything
+ * else that frame. */
 void comm_send_input(uint16_t pad);
+
+/* TRAVERSAL batch addition (Platform/Bridge/CollapsingPlatform, game/md_src/
+ * platform.c): the raw seq byte (COMM_ANIM bits [15:8]) that comm_read_frame's
+ * last SUCCESSFUL, self-consistent read consumed -- 0 before the first frame
+ * has ever landed (comm_read_frame's own "seq==0 is never a real value"
+ * convention, sh_src/comm.h's COMM_ANIM entry), the same seq value otherwise.
+ * Not a second register read: comm_read_frame() already caches it in its own
+ * static lastSeq; this just exposes that cache.
+ *
+ * Why platform.c needs this and no other consumer of comm_read_frame ever
+ * has: every moving Platform/Bridge/CollapsingPlatform's drawn position has
+ * to be derived on the 68000 from EXACTLY the same tick count sh_src/
+ * platform.c used to compute the collision position it published for --
+ * there is no spare comm register to send that tick count directly (sh_src/
+ * comm.h's own "fully allocated" note). seq already increments by exactly 1
+ * every tick the slave publishes (sh_src/comm.c's comm_publish_frame, skipping
+ * only the reserved value 0), so its DELTA between two 68000 reads is exactly
+ * how many slave ticks elapsed -- platform_clock_sync() (md_src/platform.c)
+ * accumulates that delta onto a wide local counter that is then, by
+ * construction, equal to the slave's own g_platform_tick (sh_src/platform.c)
+ * for whatever frame is currently on the bus. See platform.c's own top
+ * comment for the full derivation and the host-harness proof. */
+uint8_t comm_last_seq(void);
 
 #endif
