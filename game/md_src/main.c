@@ -132,8 +132,22 @@ static uint16_t firstRow;
 static void draw_block_column(uint16_t blockX)
 {
 	uint16_t cellX = (blockX * 2) & (PLAN_WIDTH - 1);
-	uint16_t colL[VIEW_BLOCKS_Y * 2];
-	uint16_t colR[VIEW_BLOCKS_Y * 2];
+	/* Interleaved [TL,TR,BL,BR] per row, contiguous, so the write pass below
+	 * can hand each row's left/right pair to vdp_map_hline() as ONE 2-word
+	 * burst (one VRAM address set + one auto-incremented pair write) instead
+	 * of two separate vdp_map_xy() calls, each of which re-addresses the VDP
+	 * from scratch (2026-08-18, 68000 per-frame cost task -- measured hot
+	 * spot: draw_block_column was 14/150 68000 PC samples with DEBUG_AUTORUN
+	 * running). cellX and cellX+1 are always genuinely address-adjacent in
+	 * VRAM (cellX is always even -- blockX*2 masked -- so cellX+1 never
+	 * wraps past the plane's own width), and vdp_init's autoinc is 2 the
+	 * entire time this runs (nothing in this codebase's per-frame path ever
+	 * changes it -- vdp_map_vline is the only thing that touches autoinc at
+	 * all, and it always restores 2 before returning, and nothing calls it
+	 * today), so vdp_map_hline(...,len=2) writes the exact same two values
+	 * to the exact same two addresses vdp_map_xy() would have, in the same
+	 * order, just without paying for the second address computation. */
+	uint16_t col[VIEW_BLOCKS_Y * 4];
 	uint16_t i;
 
 	if (blockX >= MAP_W) return;
@@ -160,10 +174,10 @@ static void draw_block_column(uint16_t blockX)
 		e  = &ghz_blocks[b * 4];
 		eh = &ghz_blocks[bh * 4];
 
-		colL[i * 2 + 0] = e[0] + TILE_BASE;
-		colR[i * 2 + 0] = e[1] + TILE_BASE;
-		colL[i * 2 + 1] = e[2] + TILE_BASE;
-		colR[i * 2 + 1] = e[3] + TILE_BASE;
+		col[i * 4 + 0] = e[0] + TILE_BASE;
+		col[i * 4 + 1] = e[1] + TILE_BASE;
+		col[i * 4 + 2] = e[2] + TILE_BASE;
+		col[i * 4 + 3] = e[3] + TILE_BASE;
 
 		/* FG High goes straight to Plane B here rather than through a second
 		 * buffer-then-write pass like Plane A above: high priority, so it
@@ -172,19 +186,20 @@ static void draw_block_column(uint16_t blockX)
 		 * where Sonic's own sprite priority is set to match). */
 		{
 			uint16_t cellY = (by * 2) & (PLAN_HEIGHT - 1);
-			vdp_map_xy(VDP_PLAN_B, (eh[0] + TILE_BASE) | 0x8000, cellX,     cellY);
-			vdp_map_xy(VDP_PLAN_B, (eh[1] + TILE_BASE) | 0x8000, cellX + 1, cellY);
-			vdp_map_xy(VDP_PLAN_B, (eh[2] + TILE_BASE) | 0x8000, cellX,     cellY + 1);
-			vdp_map_xy(VDP_PLAN_B, (eh[3] + TILE_BASE) | 0x8000, cellX + 1, cellY + 1);
+			uint16_t fghTop[2], fghBot[2];
+			fghTop[0] = (eh[0] + TILE_BASE) | 0x8000;
+			fghTop[1] = (eh[1] + TILE_BASE) | 0x8000;
+			fghBot[0] = (eh[2] + TILE_BASE) | 0x8000;
+			fghBot[1] = (eh[3] + TILE_BASE) | 0x8000;
+			vdp_map_hline(VDP_PLAN_B, fghTop, cellX, cellY, 2);
+			vdp_map_hline(VDP_PLAN_B, fghBot, cellX, cellY + 1, 2);
 		}
 	}
 
 	for (i = 0; i < VIEW_BLOCKS_Y; i++) {
 		uint16_t cellY = ((firstRow + i) * 2) & (PLAN_HEIGHT - 1);
-		vdp_map_xy(VDP_PLAN_A, colL[i * 2 + 0], cellX,     cellY);
-		vdp_map_xy(VDP_PLAN_A, colR[i * 2 + 0], cellX + 1, cellY);
-		vdp_map_xy(VDP_PLAN_A, colL[i * 2 + 1], cellX,     cellY + 1);
-		vdp_map_xy(VDP_PLAN_A, colR[i * 2 + 1], cellX + 1, cellY + 1);
+		vdp_map_hline(VDP_PLAN_A, &col[i * 4 + 0], cellX, cellY, 2);
+		vdp_map_hline(VDP_PLAN_A, &col[i * 4 + 2], cellX, cellY + 1, 2);
 	}
 }
 
@@ -193,8 +208,10 @@ static void draw_block_column(uint16_t blockX)
 static void draw_block_row(uint16_t blockY)
 {
 	uint16_t cellY = (blockY * 2) & (PLAN_HEIGHT - 1);
-	uint16_t rowT[VIEW_BLOCKS_X * 2];
-	uint16_t rowB[VIEW_BLOCKS_X * 2];
+	/* Interleaved [T-left,T-right,B-left,B-right] per column -- same
+	 * vdp_map_hline() pairing as draw_block_column(), see that function's
+	 * own comment for why this is exact, not approximate. */
+	uint16_t row[VIEW_BLOCKS_X * 4];
 	uint16_t i;
 
 	if (blockY >= MAP_H) return;
@@ -214,27 +231,28 @@ static void draw_block_row(uint16_t blockY)
 		e  = &ghz_blocks[b * 4];
 		eh = &ghz_blocks[bh * 4];
 
-		rowT[i * 2 + 0] = e[0] + TILE_BASE;
-		rowT[i * 2 + 1] = e[1] + TILE_BASE;
-		rowB[i * 2 + 0] = e[2] + TILE_BASE;
-		rowB[i * 2 + 1] = e[3] + TILE_BASE;
+		row[i * 4 + 0] = e[0] + TILE_BASE;
+		row[i * 4 + 1] = e[1] + TILE_BASE;
+		row[i * 4 + 2] = e[2] + TILE_BASE;
+		row[i * 4 + 3] = e[3] + TILE_BASE;
 
 		/* FG High straight to Plane B; see draw_block_column's comment. */
 		{
 			uint16_t cx = (bx * 2) & (PLAN_WIDTH - 1);
-			vdp_map_xy(VDP_PLAN_B, (eh[0] + TILE_BASE) | 0x8000, cx,     cellY);
-			vdp_map_xy(VDP_PLAN_B, (eh[1] + TILE_BASE) | 0x8000, cx + 1, cellY);
-			vdp_map_xy(VDP_PLAN_B, (eh[2] + TILE_BASE) | 0x8000, cx,     cellY + 1);
-			vdp_map_xy(VDP_PLAN_B, (eh[3] + TILE_BASE) | 0x8000, cx + 1, cellY + 1);
+			uint16_t fghTop[2], fghBot[2];
+			fghTop[0] = (eh[0] + TILE_BASE) | 0x8000;
+			fghTop[1] = (eh[1] + TILE_BASE) | 0x8000;
+			fghBot[0] = (eh[2] + TILE_BASE) | 0x8000;
+			fghBot[1] = (eh[3] + TILE_BASE) | 0x8000;
+			vdp_map_hline(VDP_PLAN_B, fghTop, cx, cellY, 2);
+			vdp_map_hline(VDP_PLAN_B, fghBot, cx, cellY + 1, 2);
 		}
 	}
 
 	for (i = 0; i < VIEW_BLOCKS_X; i++) {
 		uint16_t cellX = ((firstCol + i) * 2) & (PLAN_WIDTH - 1);
-		vdp_map_xy(VDP_PLAN_A, rowT[i * 2 + 0], cellX,     cellY);
-		vdp_map_xy(VDP_PLAN_A, rowT[i * 2 + 1], cellX + 1, cellY);
-		vdp_map_xy(VDP_PLAN_A, rowB[i * 2 + 0], cellX,     cellY + 1);
-		vdp_map_xy(VDP_PLAN_A, rowB[i * 2 + 1], cellX + 1, cellY + 1);
+		vdp_map_hline(VDP_PLAN_A, &row[i * 4 + 0], cellX, cellY, 2);
+		vdp_map_hline(VDP_PLAN_A, &row[i * 4 + 2], cellX, cellY + 1, 2);
 	}
 }
 
@@ -600,8 +618,90 @@ int main(void)
 
 	draw_screen();
 
+/* 1 = force PAD_RIGHT held from boot, so a measurement rig (ares + lldb, or
+ * the Neptune with a stopwatch) can observe the game under MOVING load with
+ * no controller: scrolling, object churn and streaming all behave as in real
+ * play. Same spirit as DEBUG_TILE_BENCH above. Leave 0 to ship. */
+#define DEBUG_AUTORUN 0
+
+#if DEBUG_AUTORUN
+/* A blind hold-right with no jump dies at GHZ1's very first obstacle (a
+ * pit/badnik a couple of seconds in) and respawns into a permanent death
+ * loop right there, never reaching the denser part of the act this task
+ * needs to measure/observe -- confirmed directly by the user playing it
+ * live, not assumed, and the user also confirmed a single jump alone dies
+ * again a second or two after clearing the first obstacle. Rather than
+ * hand-time each individual GHZ1 gap/spike/badnik along the blind path
+ * (fragile, one relink away from being wrong again), pulse jump
+ * periodically for the first stretch of the act -- enough to clear the
+ * early obstacle cluster and reach the denser part of the level this task
+ * needs to measure, same spirit as "accept one death-loop cluster
+ * downstream and report it" in this task's own brief. player.c's own
+ * jumpPress is edge-triggered off pad&~prevPad, PAD_A|PAD_B|PAD_C, so each
+ * pulse only needs to transition from released to held once. Frame-counted,
+ * not wall-clock: this loop's own iteration rate is what actually paces
+ * comm_send_input, so counting its own iterations is the correct clock for
+ * "how many frames since boot" even when vdp_wait_vblank ends up skipping
+ * real vblanks under load. */
+static uint32_t autorunFrame;
+#define AUTORUN_JUMP_AT       118  /* ~2s in -- the first obstacle's own
+                                     * measured timing, confirmed by the user
+                                     * playing it live */
+#define AUTORUN_JUMP_PERIOD   150  /* ~2.5s at a nominal 60fps, thereafter */
+#define AUTORUN_JUMP_FRAMES   6    /* held a few frames, not just one, so a
+                                     * torn/skipped comm update on any single
+                                     * frame still leaves a clean edge visible */
+#define AUTORUN_JUMP_PULSES   12   /* ~30s of periodic jumps after the first,
+                                     * then purely blind hold-right for
+                                     * whatever this task's own accepted
+                                     * death-loop cluster is */
+
+/* NEW FINDING (68000 sprite pipeline perf task, 2026-08-20), NOT fixed here
+ * (sh_src is out of scope for that task and stays untouched): with this
+ * jump pulse enabled (1 pulse is enough; 12 and 2000 were also tried, same
+ * result), Sonic reliably clears the first obstacle (a Motobug around
+ * worldX~830) but then HARD-STALLS at worldX~1165-1170 -- not a death loop
+ * (worldX/worldY/camX read bit-for-bit identical, e.g. exactly 887/1165/780,
+ * across 90+ continuous seconds via COMM8/COMM10/COMM6), right at GHZ1's
+ * FIRST rope bridge (assets/ghz/bridges.bin row 0, x=1184,y=904 -- a
+ * screenshot confirms Sonic standing ON the bridge deck, mid-hop pose,
+ * making zero net progress). Comm-tick fps during the stall is a stable
+ * ~28.2-28.9, i.e. the game loop is very much still running (not hung) --
+ * Sonic's own horizontal velocity is specifically the thing pinned to zero.
+ * WITHOUT the jump pulse, Sonic instead dies cleanly on the Motobug at
+ * worldX~800-810 and respawns to ~150-180, over and over -- a real,
+ * different, ALSO pre-existing obstacle, so this bridge stall is reachable
+ * only via the very mechanism (a jump) needed to survive the Motobug first.
+ * Read (not written) sh_src/bridge.c and sh_src/player.c's own ground-
+ * movement code looking for a plausible cause and found nothing conclusive
+ * in bridge.c itself (it only ever touches e.y/e.velY/e.onGround while the
+ * player is standing on it, never e.velX/e.groundVel) -- the actual
+ * mechanism is unconfirmed. Confirmed NOT caused by this task's own changes
+ * (68000-side drawing only: obj_sprite.h/obj_generic.c/obj_data.h's
+ * template + offset plumbing, spikes.c's windowing, the Makefile -- zero
+ * sh_src, zero gameplay-logic touches), and confirmed pre-existing (this
+ * whole DEBUG_AUTORUN block, including the jump-pulse tuning, already
+ * existed before this task started). Net effect for THIS task: the
+ * originally-planned camX~4300 dense bridge/badnik cluster measurement was
+ * unreachable via autorun; see this task's own final report for what was
+ * measured instead and how. Flagged here, not routed around, per this
+ * project's own standing "surface compromises, don't silently absorb them"
+ * rule -- worth a dedicated look before the next perf task needs this same
+ * knob to reach anywhere past GHZ1's first bridge. */
+#endif
+
 	for (;;) {
 		uint16_t pad = pad_read();
+#if DEBUG_AUTORUN
+		pad |= PAD_RIGHT;
+		autorunFrame++;
+		if (autorunFrame >= AUTORUN_JUMP_AT) {
+			uint32_t sinceFirst = autorunFrame - AUTORUN_JUMP_AT;
+			if (sinceFirst / AUTORUN_JUMP_PERIOD < AUTORUN_JUMP_PULSES
+			    && (sinceFirst % AUTORUN_JUMP_PERIOD) < AUTORUN_JUMP_FRAMES)
+				pad |= PAD_A;
+		}
+#endif
 		uint16_t wantCol, wantRow;
 		uint16_t sparkleCount, sonicCount;
 		uint16_t total, i;
@@ -790,11 +890,23 @@ int main(void)
 		 * Fixed by capturing dstIdx into a local ONCE, so a side-effecting
 		 * argument is safe regardless of how many fields the macro body
 		 * touches. */
+/* Link is set HERE, during the one copy pass, as (dstIdx+1) -- every entry
+		 * but the last one's link is already its own final value the instant it
+		 * is written (link == "next slot over", true for every position except
+		 * the very last, however many entries this frame ends up with), so the
+		 * separate full O(total) rebuild pass this loop used to need after the
+		 * copy (main.c's own history: `for (i=0;i<total;i++) list[i].link=i+1;`)
+		 * is now just ONE O(1) fixup below, not a second pass over up to 80
+		 * entries every frame (2026-08-20, this task's own SAT-copy measurement:
+		 * folding the link write into the existing 4-field store below is free
+		 * -- same cache line, same loop -- where the old separate pass was pure
+		 * re-touching every entry that had literally just been written). */
 #define OBJ_POOL_COPY(dstIdx, src) \
 		do { \
 			uint16_t d_ = (dstIdx); \
 			list[d_].y = (src).y; \
 			list[d_].size = (src).size; \
+			list[d_].link = (uint16_t)(d_ + 1); \
 			list[d_].attr = (src).attr; \
 			list[d_].x = (src).x; \
 		} while (0)
@@ -808,8 +920,19 @@ int main(void)
 			}
 		}
 #undef OBJ_POOL_COPY
-		for (i = 0; i < total; i++) list[i].link = (uint16_t)(i + 1);
-		list[total - 1].link = 0;
+		/* Hidden-terminator fixup: the ONE entry whose link the copy pass
+		 * above got wrong (it always writes dstIdx+1, but the true last entry
+		 * has no next slot) -- link 0 is this table's own "stop" convention
+		 * (main.c's OBJ_TYPE_LIST comment / obj_pool.h), and every slot from
+		 * here to HW_SPRITE_CAP-1 is simply never written this frame and never
+		 * reachable either, since the chain the VDP actually walks starts at
+		 * slot 0 and always terminates right here -- see obj_sprite.h's own
+		 * Job A comment for why a slot being stale is no longer even possible
+		 * to observe (nothing off-screen is ever a candidate in the first
+		 * place). Guarded for total==0 purely defensively -- Sonic's own
+		 * reserved slice is never zero in practice -- so this can never
+		 * underflow into list[-1]. */
+		if (total > 0) list[total - 1].link = 0;
 
 		/* Debug overlay, compile-time gated (user asked for a clean screen once
 	 * rings proved out). Re-enable for bring-up work -- on real hardware

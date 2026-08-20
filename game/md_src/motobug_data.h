@@ -6,14 +6,11 @@
 #include <stdint.h>
 #include "obj_data.h"
 
-#define MOTOBUG_PAL 0
-#define MOTOBUG_MAX_FRAME_TILES  22
+#define MOTOBUG_PAL 3
+#define MOTOBUG_MAX_FRAME_TILES  18
 #define MOTOBUG_MAX_FRAME_PIECES 2
 
-extern const ObjFrame motobug_move[12];
-extern const ObjFrame motobug_idle[2];
-extern const ObjFrame motobug_turn[6];
-extern const ObjFrame motobug_puff[9];
+extern const ObjFrame motobug_move[2];
 extern const ObjPiece motobug_pieces[];
 
 #endif

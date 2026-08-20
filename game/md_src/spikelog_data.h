@@ -6,11 +6,11 @@
 #include <stdint.h>
 #include "obj_data.h"
 
-#define SPIKELOG_PAL 2
-#define SPIKELOG_MAX_FRAME_TILES  6
+#define SPIKELOG_PAL 0
+#define SPIKELOG_MAX_FRAME_TILES  4
 #define SPIKELOG_MAX_FRAME_PIECES 1
 
-extern const ObjFrame spikelog_rotate[32];
+extern const ObjFrame spikelog_rotate[2];
 extern const ObjPiece spikelog_pieces[];
 
 #endif

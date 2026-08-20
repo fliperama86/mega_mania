@@ -7,14 +7,10 @@
 #include "obj_data.h"
 
 #define BUZZBOMBER_PAL 0
-#define BUZZBOMBER_MAX_FRAME_TILES  19
+#define BUZZBOMBER_MAX_FRAME_TILES  18
 #define BUZZBOMBER_MAX_FRAME_PIECES 2
 
 extern const ObjFrame buzzbomber_fly[1];
-extern const ObjFrame buzzbomber_shoot[11];
-extern const ObjFrame buzzbomber_wings[4];
-extern const ObjFrame buzzbomber_thrust[4];
-extern const ObjFrame buzzbomber_projectile[12];
 extern const ObjPiece buzzbomber_pieces[];
 
 #endif

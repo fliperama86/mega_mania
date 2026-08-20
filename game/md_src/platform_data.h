@@ -7,10 +7,10 @@
 #include "obj_data.h"
 
 #define PLATFORM_PAL 0
-#define PLATFORM_MAX_FRAME_TILES  144
-#define PLATFORM_MAX_FRAME_PIECES 10
+#define PLATFORM_MAX_FRAME_TILES  24
+#define PLATFORM_MAX_FRAME_PIECES 2
 
-extern const ObjFrame platform_normal[4];
+extern const ObjFrame platform_normal[1];
 extern const ObjFrame platform_swing[3];
 extern const ObjPiece platform_pieces[];
 

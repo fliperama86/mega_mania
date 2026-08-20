@@ -10,9 +10,7 @@
 #define CHOPPER_MAX_FRAME_TILES  16
 #define CHOPPER_MAX_FRAME_PIECES 1
 
-extern const ObjFrame chopper_jump[8];
-extern const ObjFrame chopper_swim[8];
-extern const ObjFrame chopper_charge[8];
+extern const ObjFrame chopper_jump[2];
 extern const ObjPiece chopper_pieces[];
 
 #endif

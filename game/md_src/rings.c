@@ -99,67 +99,69 @@ static uint16_t sparkleDropCount;     /* pool-full evictions, cosmetic deviation
 static uint16_t curCamY;
 static int8_t   curHbLeft, curHbTop, curHbRight, curHbBottom;
 
-/* Rotation frames: streamed through md_src/obj_generic.h's per-class
- * ANIMATION WINDOW instead of held whole-sheet-resident (this file's own
- * previous approach, and still the right one for the sparkle portion
- * further down -- see ringSparkleArenaDesc's own comment for exactly why
- * the split). Every ring on screen shares the SAME rotation phase
- * (ringFrame below, Zone_StaticUpdate's own behaviour, Zone.c:92-95) -- the
- * direct precedent obj_generic.h's own top-of-section comment on
- * obj_anim_window_register() cites for choosing lockstep sharing over a
- * per-instance frame cache -- so ONE window, 4 tiles times 2 (never torn),
- * correctly serves all 445 rings at once: there is no per-instance
- * divergence to lose here, rings were never independently animated in the
- * original either.
- *
- * ringRotFramesRaw is the RAW frame table obj_anim_window_register() reads
- * from (offsets into ring_tiles directly, not yet rebased to any VRAM
- * address -- the window rebases the ONE currently-active row into
- * ringRotWindow's own one-row table internally); built once in rings_init(),
- * same values RING_ANIM0_TILE_BASE/RING_ANIM0_FRAMES always described. One
- * shared ObjPiece (a plain 2x2 sprite, no piece splitting -- a ring never
- * needs more than one hardware sprite) backs every one of the 16 frames;
- * ringType.pieces stays exactly this, unaffected by anything above --
- * pieces are ROM/RAM data, never VRAM-resident, so they never need a
- * window at all (obj_generic.h's own comment on this same point). */
-static ObjFrame ringRotFramesRaw[RING_ANIM0_FRAMES];
-static ObjAnimWindow *ringRotWindow;   /* NULL until rings_init() succeeds */
+/* Rotation frames: VRAM ART BUDGET (art-budget trim task, 2026-08-18) --
+ * used to STREAM through md_src/obj_generic.h's per-class ANIMATION WINDOW
+ * (an 8-tile reservation, cycling one of the 16 real rotation frames in at a
+ * time -- the exact churn this whole task exists to kill). tools/
+ * convert_objects.py's convert_ring_art now converts only RING_ANIM0_FRAMES
+ * =4 of those 16 (Sonic 1's own count, this task's brief), subsampled evenly
+ * around the spin (quarter-turns) -- ringRotFrames[] holds all 4,
+ * PERMANENTLY VRAM-resident (16 tiles total, ring_rot_onBase() below), no
+ * streaming, no churn. Every ring on screen still shares the SAME rotation
+ * phase (ringFrame below, Zone_StaticUpdate's own behaviour, Zone.c:92-95)
+ * -- rings were never independently animated in the original either -- but
+ * ringFrame keeps counting its original 0..15 range at its original pace
+ * (unchanged timing feel); ring_decide() below just maps it onto this
+ * smaller resident set with ringFrame>>2. */
+static ObjFrame ringRotFrames[RING_ANIM0_FRAMES];
+static uint16_t ringRotBase;
+static uint8_t  ringRotLive;
+static uint8_t  ringRotRegistered;   /* boot-load success, see rings_update()'s own comment */
 static ObjPiece ringPiece;
 
 static ObjDrawDecision ring_decide(void *st, uint16_t entryIndex, int16_t ex, int16_t ey,
                                    int16_t sonicWorldX, int16_t sonicWorldY,
                                    uint16_t sonicFrameIndex);
 
-/* entries and frames are patched in at runtime, in rings_init() -- entries
- * for the usual "reading another static variable's VALUE is not a constant
- * expression" reason (springs.c's own comment on springType), frames because
- * it is not known until obj_anim_window_register() hands back a live
- * ObjAnimWindow* to call obj_anim_window_frames() on.
+/* entries is patched in at runtime, in rings_init() -- the usual "reading
+ * another static variable's VALUE is not a constant expression" reason
+ * (springs.c's own comment on springType). frames points at ringRotFrames
+ * (a stable pointer for the whole program's life -- only ITS CONTENTS'
+ * tileOffset changes, once, in ring_rot_onBase() below, the same "rebase
+ * once at grant time" pattern every plain-resident tenant in this batch
+ * uses, e.g. motobug.c's own mbFrames).
  *
  * tilePixels/residentTileCount are 0/NULL here on purpose -- rings' tile
- * upload never goes through obj_type_init() at all: the rotation portion
- * streams through the per-class ANIMATION WINDOW (md_src/obj_generic.h,
- * rings_init()/ringAnimDesc below), the sparkle portion through the
- * whole-sheet-resident arena directly (ringSparkleArenaDesc below), neither
- * of which obj_type_draw() itself ever reads either field for. */
+ * upload never goes through obj_type_init() at all: both the rotation
+ * portion (ringRotArenaDesc below) and the sparkle portion
+ * (ringSparkleArenaDesc further down) upload through the arena's own
+ * boot-load path directly, neither of which obj_type_draw() itself ever
+ * reads either field for. */
 static ObjTypeDesc ringType = {
     (const void *)ghz_ring_xy, sizeof(int16_t) * 2, RING_COUNT, ghz_ring_count_p,
     (const uint32_t *)0, 0,
-    (const ObjFrame *)0 /* patched in rings_init() to obj_anim_window_frames(ringRotWindow) */,
+    ringRotFrames,
     &ringPiece,
     OBJ_PRI_RING, RING_PAL, 0 /* low priority, matches springs/signpost */,
     16,                        /* marginX, matches the old camX-16/+16 window */
-    ring_decide, 0
+    ring_decide, 0,
+    /* Not templated (Job 1, this task): ringPiece is a single SHARED piece
+     * (dx=dy=0, pieceOffset always 0) reused across all RING_ANIM0_FRAMES
+     * rotation frames -- the parallel-array-indexed-by-pieceOffset scheme
+     * every other templated type uses cannot represent "4 different frames'
+     * worth of attr at the same index 0" this way. Rings' own per-piece
+     * legacy cost is already minimal (1 piece, constant dx/dy, no flip) --
+     * flagged as a candidate for a bespoke per-frame (not per-pieceOffset)
+     * template scheme in a follow-up if profiling still shows this hot.
+     * Legacy obj_emit_pieces() path unchanged. */
+    0, 0
 };
 
-/* RING_ROT_MAX_FRAME_TILES: every one of the 16 rotation frames is exactly 4
- * tiles (RING_ANIM0_FRAMES*4=64 checks out against RING_SPARKLE1_TILE_BASE=
- * 64, ring_data.h), so the window reserves 2*4=8 tiles total -- one frame
- * swap always lands in a single vblank (4 < ARENA_TILES_PER_FRAME), the
- * window never actually lags a rotation step in practice even though the
- * mechanism (obj_generic.h) is built to tolerate it if it ever did. */
-#define RING_ROT_MAX_FRAME_TILES 4
-#define RING_SPARKLE_TILES ((uint16_t)(RING_TILE_COUNT - RING_SPARKLE1_TILE_BASE))   /* 92 */
+/* Every one of the 4 kept rotation frames is exactly 4 tiles (RING_ANIM0_
+ * FRAMES*4=16 checks out against RING_SPARKLE1_TILE_BASE=16, ring_data.h),
+ * so this resident tenant is 16 tiles total. */
+#define RING_ROT_TILES ((uint16_t)(RING_ANIM0_FRAMES * 4))
+#define RING_SPARKLE_TILES ((uint16_t)(RING_TILE_COUNT - RING_SPARKLE1_TILE_BASE))   /* 8 */
 
 /* entries/sheetPixels are patched in at runtime in rings_init() (same reason
  * springType.entries/tilePixels above are: a static initializer here would
@@ -167,27 +169,31 @@ static ObjTypeDesc ringType = {
  * expression GCC is willing to fold, only its ADDRESS -- see springs.c's own
  * comment on springType).
  *
- * lookaheadX is NOT just ARENA_LOOKAHEAD_X(RING_ROT_MAX_FRAME_TILES): the
- * rotation window and the sparkle grant below it SHARE one per-vblank
- * upload budget (obj_anim_window_upload() yields to obj_arena_upload()'s own
- * whole-class fills -- obj_generic.h's own doc comment), so if both classes'
- * admission windows opened at the same camera distance, rotation's own tiny
- * 4-tile load could end up queued behind the sparkle portion's much bigger
- * 92-tile reload and miss its own deadline. Rather than depend on the
- * arena's tie-break order (lower-slot-wins -- true today since this is
- * registered before ringSparkleArenaDesc, but a fragile thing for a
- * lookahead margin to silently depend on), rotation's own window opens
- * comfortably EARLIER than the sparkle grant's -- an extra full
- * ARENA_LOOKAHEAD_X(RING_ROT_MAX_FRAME_TILES) worth of margin on top of the
- * sparkle grant's own -- so rotation is always fully loaded and live before
- * the sparkle grant's window even opens, never actually contending for the
- * shared budget against it at all. */
-static ObjAnimWindowDesc ringAnimDesc = {
+ * lookaheadX is a plain ARENA_LOOKAHEAD_X(RING_ROT_TILES) now -- the old
+ * "avoid contending with the sparkle grant's own amortized upload budget"
+ * concern this comment used to carry no longer applies: both rotation and
+ * sparkle are boot-loaded SYNCHRONOUSLY (obj_arena_boot_load(), one plain
+ * vdp_tiles_load() each, no per-vblank amortization at all), so there is no
+ * shared runtime upload budget left for the two to contend over any more --
+ * see obj_arena_boot_load()'s own doc comment. */
+static void ring_rot_onBase(uint16_t base);
+static void ring_rot_onLive(uint8_t live) { ringRotLive = live; }
+
+static ArenaClassDesc ringRotArenaDesc = {
     (const void *)0, sizeof(int16_t) * 2, RING_COUNT,
-    (int16_t)(ARENA_LOOKAHEAD_X(RING_SPARKLE_TILES) + ARENA_LOOKAHEAD_X(RING_ROT_MAX_FRAME_TILES)),
+    (const uint32_t *)0, RING_ROT_TILES,
+    (int16_t)ARENA_LOOKAHEAD_X(RING_ROT_TILES),
     OBJ_PRI_RING,
-    (const uint32_t *)0, ringRotFramesRaw, RING_ANIM0_FRAMES, RING_ROT_MAX_FRAME_TILES
+    ring_rot_onBase, ring_rot_onLive
 };
+
+static void ring_rot_onBase(uint16_t base)
+{
+    uint8_t i;
+    ringRotBase = base;
+    for (i = 0; i < RING_ANIM0_FRAMES; i++)
+        ringRotFrames[i].tileOffset = (uint16_t)(base + i * 4);
+}
 
 /* The sparkle portion of ring_tiles (ring_data.h: RING_SPARKLE1_TILE_BASE=64
  * through RING_TILE_COUNT=156, 92 tiles) stays on the WHOLE-SHEET-RESIDENT
@@ -519,7 +525,10 @@ static ObjDrawDecision ring_decide(void *st, uint16_t entryIndex, int16_t ex, in
     int32_t ylo, yhi;
     (void)st; (void)sonicFrameIndex;
 
-    d.flipH = 0; d.flipV = 0; d.frame = OBJ_SKIP;
+    /* Rings never move after spawn -- see obj_data.h's own ObjDrawDecision
+     * comment (Job 2, this task): 0 here makes obj_type_draw()'s new
+     * offX/offY application an exact no-op. */
+    d.flipH = 0; d.flipV = 0; d.offX = 0; d.offY = 0; d.frame = OBJ_SKIP;
 
     if (ring_is_collected(entryIndex)) return d;
 
@@ -539,33 +548,29 @@ static ObjDrawDecision ring_decide(void *st, uint16_t entryIndex, int16_t ex, in
     yhi = (int32_t)curCamY + SCREEN_HEIGHT + 16;
     if (ey < ylo || ey >= yhi) return d;
 
-    /* obj_generic.h's own two-line recipe: obj_anim_window_frames() is
-     * always exactly one row, so "draw the shared rotation frame" is
-     * "index 0 of it, if it is actually resident this instant" -- never
-     * ringFrame itself, which is only ever a REQUEST (obj_anim_window_select,
-     * called from rings_update() below); the window may still be showing
-     * the previous step for a tick or two behind that request, and this is
-     * how every ring agrees on which one, together, rather than each
-     * re-deciding it independently. */
-    d.frame = obj_anim_window_live(ringRotWindow) ? 0 : OBJ_SKIP;
+    /* ringFrame (0..15, Zone_StaticUpdate's own pace) maps onto this
+     * class's own 4 resident frames with >>2 -- always in range. Both
+     * poses being simultaneously resident now (no streaming window to lag
+     * behind a request) means every ring reads the exact current value,
+     * not a "may still be showing the previous step" approximation. */
+    d.frame = ringRotLive ? (uint16_t)(ringFrame >> 2) : OBJ_SKIP;
     return d;
 }
 
 /* No firstTile parameter any more (contrast the pre-arena rings_init(),
  * which took one and chained its return into springs_init()): rings no
  * longer occupy a permanent slice of a fixed boot-time layout. Two
- * independent arena tenants now, registered in this order --
- * ringAnimDesc's own 8-tile window (rotation, obj_anim_window_boot_load()
- * below: it, specifically, DOES still need a synchronous boot-time
- * admission+upload, since GHZ1's very first ring (RING_SPAN_LO) sits inside
- * the first camera view and the normal runtime admission path only ever
- * runs from inside main()'s own per-frame loop, well after this) and
- * ringSparkleArenaDesc's own 92-tile whole-blob resident set (via plain
- * obj_arena_boot_load()/obj_arena_boot_done(), same pattern springs.c/
- * signpost.c's own resident sets already use) -- lands both at the SAME
- * addresses the old fixed boot-time chain always gave the combined 156-tile
- * block, first-fit against an empty arena, just split into two smaller
- * grants instead of one. */
+ * independent arena tenants now, registered in this order -- ringRotArenaDesc's
+ * own RING_ROT_TILES=16-tile resident set and ringSparkleArenaDesc's own
+ * 8-tile resident set, both via plain obj_arena_boot_load()/obj_arena_boot_done()
+ * (same pattern springs.c/signpost.c's own resident sets already use, and
+ * what ringSparkleArenaDesc already did before this task) -- both need a
+ * synchronous boot-time admission+upload, since GHZ1's very first ring
+ * (RING_SPAN_LO) sits inside the first camera view and the normal runtime
+ * admission path only ever runs from inside main()'s own per-frame loop,
+ * well after this. Lands both at the SAME addresses the old fixed boot-time
+ * chain always gave the combined 156-tile block, first-fit against an empty
+ * arena, just split into two smaller grants instead of one. */
 void rings_init(void)
 {
     uint16_t i;
@@ -573,13 +578,13 @@ void rings_init(void)
     uint16_t base;
 
     for (i = 0; i < RING_ANIM0_FRAMES; i++) {
-        ringRotFramesRaw[i].tileOffset = (uint16_t)(RING_ANIM0_TILE_BASE + i * 4);
-        ringRotFramesRaw[i].pieceOffset = 0;
-        ringRotFramesRaw[i].tileCount = 4;
-        ringRotFramesRaw[i].pieceCount = 1;
-        ringRotFramesRaw[i].pivotX = -8;
-        ringRotFramesRaw[i].pivotY = -8;
-        ringRotFramesRaw[i].duration = 0;
+        ringRotFrames[i].tileOffset = 0;   /* real value set by ring_rot_onBase() */
+        ringRotFrames[i].pieceOffset = 0;
+        ringRotFrames[i].tileCount = 4;
+        ringRotFrames[i].pieceCount = 1;
+        ringRotFrames[i].pivotX = -8;
+        ringRotFrames[i].pivotY = -8;
+        ringRotFrames[i].duration = 0;
     }
     ringPiece.dx = 0;
     ringPiece.dy = 0;
@@ -594,7 +599,8 @@ void rings_init(void)
     for (i = 0; i < SPARKLE_POOL_SIZE; i++) sparkles[i].active = 0;
     sparkleClock = 0;
     sparkleDropCount = 0;
-    ringRotWindow = (ObjAnimWindow *)0;
+    ringRotRegistered = 0;
+    ringRotLive = 0;
     ringSparkleLive = 0;
 
     /* sonic_anims[] is a link-time constant (tools/convert_sonic.py's
@@ -611,16 +617,18 @@ void rings_init(void)
      * own leading count word has to still match RING_COUNT, or the x-sorted
      * table below is not what every compile-time RING_COUNT reference in
      * this file assumes it is. On a mismatch, rings stay permanently
-     * disabled for this run (ringRotWindow stays NULL, rings_enabled()
+     * disabled for this run (ringRotRegistered stays 0, rings_enabled()
      * reports it) exactly like before. */
     if (ghz_ring_count != RING_COUNT) return;
 
-    ringAnimDesc.entries = (const void *)ghz_ring_xy;
-    ringAnimDesc.sheetPixels = ring_tiles;
-    ringRotWindow = obj_anim_window_register(&ringAnimDesc);
-    if (!ringRotWindow) return;
-    if (obj_anim_window_boot_load(ringRotWindow, ringFrame)) { ringRotWindow = (ObjAnimWindow *)0; return; }
-    ringType.frames = obj_anim_window_frames(ringRotWindow);
+    ringRotArenaDesc.entries = (const void *)ghz_ring_xy;
+    ringRotArenaDesc.tilePixels = ring_tiles;
+    slot = obj_arena_register(&ringRotArenaDesc);
+    base = obj_arena_boot_load(slot);
+    if (base == 0xFFFF) return;
+    vdp_tiles_load(ring_tiles, base, RING_ROT_TILES);
+    obj_arena_boot_done(slot);
+    ringRotRegistered = 1;
 
     ringSparkleArenaDesc.entries = (const void *)ghz_ring_xy;
     ringSparkleArenaDesc.tilePixels = ring_tiles + (uint32_t)RING_SPARKLE1_TILE_BASE * 8;
@@ -639,7 +647,7 @@ void rings_add(uint16_t amount)
     ringPlayerCount = (v > 999) ? 999 : (uint16_t)v;
 }
 
-uint8_t  rings_enabled(void)             { return obj_anim_window_live(ringRotWindow); }
+uint8_t  rings_enabled(void)             { return ringRotLive; }
 uint16_t rings_sparkle_drop_count(void)  { return sparkleDropCount; }
 
 uint16_t rings_emit_sparkles(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
@@ -757,32 +765,22 @@ uint16_t rings_update(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
                       uint16_t sonicFrameIndex)
 {
     /* Permanently-disabled-for-this-run check only (boot failure) -- NOT
-     * "currently resident": obj_anim_window_select() below has to run even
-     * while the rotation window is between grants (evicted far from camera,
-     * or freshly re-admitted and still on its first upload) or it would
-     * never have anything queued to load the next time it IS granted. See
-     * obj_anim_window_select()'s own doc comment ("call this unconditionally
-     * every tick"). ring_decide() already reads obj_anim_window_live() to
-     * skip drawing (and the collect touch-test does not depend on tile
-     * residency at all -- it never did, Ring_Collect's own collision check
-     * has nothing to do with what is in VRAM), so no separate liveness gate
-     * belongs here any more. */
-    if (!ringRotWindow) return 0;
+     * "currently resident": ring_decide() already reads ringRotLive to skip
+     * drawing (and the collect touch-test does not depend on tile residency
+     * at all -- it never did, Ring_Collect's own collision check has
+     * nothing to do with what is in VRAM), so no separate liveness gate
+     * belongs here. */
+    if (!ringRotRegistered) return 0;
 
     /* Zone.c:92-95 (Zone_StaticUpdate): ringFrame advances every 2nd tick,
      * wraps &0xF. rings_update() is called once per displayed 68000 frame
      * (main.c), the same nominal 60 Hz cadence Zone_StaticUpdate runs at, so
-     * "every 2nd tick" becomes "every 2nd call" here. */
+     * "every 2nd tick" becomes "every 2nd call" here. Both resident poses
+     * this maps onto (ring_decide()'s own ringFrame>>2) are simultaneously
+     * VRAM-resident now -- no per-tick "select which one to stream in"
+     * request left to make, unlike the old anim-window mechanism. */
     if (ringFrameParity) ringFrame = (ringFrame + 1) & 0xF;
     ringFrameParity ^= 1;
-
-    /* ONE shared request per tick, driving the ONE shared window every ring
-     * on screen reads from -- obj_generic.h's own top-of-section comment on
-     * why this has to be called with one class-wide value, never once per
-     * candidate ring. A no-op whenever the window is not currently granted
-     * (evicted) or already showing/loading this exact frame -- see its own
-     * doc comment. */
-    obj_anim_window_select(ringRotWindow, ringFrame);
 
     /* Stashed once per call for ring_decide() -- see that variable's own
      * comment. */
@@ -872,10 +870,10 @@ void rings_lost_tick(int16_t sonicWorldX, int16_t sonicWorldY, uint16_t sonicFra
     uint16_t i;
 
     /* Boot-failure gate only -- see rings_update()'s own comment on why
-     * this is ringRotWindow!=NULL, not a transient residency check: a lost
+     * this is ringRotRegistered, not a transient residency check: a lost
      * ring's own physics/scatter-trigger has nothing to do with which tiles
      * happen to be resident right now. */
-    if (!ringRotWindow) return;
+    if (!ringRotRegistered) return;
 
     /* The hit inference: see this file's top-of-section comment. Edge
      * (not level) detection is required -- ANI_HURT's frame 0 (speed 1,
@@ -940,10 +938,8 @@ uint16_t rings_lost_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLin
 
     /* Unlike rings_lost_tick() above, this DOES read VRAM (the tile index
      * below), so this needs the real, transient residency check -- never
-     * draw the rotation frame's tile index while the window is not
-     * live (obj_generic.h's own "never draw whatever pixels happen to be at
-     * that VRAM address" rule). */
-    if (!obj_anim_window_live(ringRotWindow)) return 0;
+     * draw a rotation frame's tile index while this tenant is not live. */
+    if (!ringRotLive) return 0;
 
     ylo = (int32_t)camY - 16;
     yhi = (int32_t)camY + SCREEN_HEIGHT + 16;
@@ -966,11 +962,10 @@ uint16_t rings_lost_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLin
         /* Priority 0: a lost ring is still a ring -- same low priority as
          * ringType's own descriptor above, not the sparkles' high one.
          * Reads the SAME shared rotation frame every resident ring reads
-         * (obj_anim_window_frames(ringRotWindow)[0] -- guaranteed live, just
-         * checked above), not necessarily exactly ringFrame's own value if
-         * a swap is still in flight -- same lockstep agreement every other
-         * ring already follows. */
-        out->attr = TILE_ATTR(RING_PAL, 0, 0, 0, obj_anim_window_frames(ringRotWindow)[0].tileOffset);
+         * (ringRotFrames[ringFrame>>2] -- guaranteed live, just checked
+         * above), the exact current value, same lockstep agreement every
+         * other ring already follows. */
+        out->attr = TILE_ATTR(RING_PAL, 0, 0, 0, ringRotFrames[ringFrame >> 2].tileOffset);
         out->x = (int16_t)(128 + (sx - 8 - (int16_t)camX));
         n++;
     }

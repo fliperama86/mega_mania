@@ -68,6 +68,10 @@ static ObjDrawDecision decoration_decide(void *st, uint16_t entryIndex, int16_t 
 	 * flipH bit already covers every value this table ever holds. */
 	d.flipH = e->direction;
 	d.flipV = 0;
+	/* Decoration is static scenery, never moves -- see obj_data.h's own
+	 * ObjDrawDecision comment (Job 2, this task). */
+	d.offX = 0;
+	d.offY = 0;
 	d.frame = OBJ_SKIP;
 
 	ylo = (int32_t)curCamY - 16;
@@ -98,7 +102,12 @@ static ObjTypeDesc decorationType = {
 	                                    * every GHZ1 instance takes the original's
 	                                    * own low objectDrawGroup[0] branch */,
 	16,                        /* marginX, matches rings/springs/signpost */
-	decoration_decide, (void *)0
+	decoration_decide, (void *)0,
+	/* Not templated (Job 1, this task): 21 GHZ1 entries, 1 piece each,
+	 * static scenery -- far below the profiled dense-cluster hot path
+	 * (badniks/rings/spikelog), not worth the added array/rebuild-hook
+	 * plumbing for this pass. Legacy obj_emit_pieces() path unchanged. */
+	(const ObjPieceTemplate *)0, (const ObjPieceTemplate *)0
 };
 
 static void decoration_arena_onBase(uint16_t base)

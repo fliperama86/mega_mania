@@ -10,10 +10,7 @@
 #define CRABMEAT_MAX_FRAME_TILES  24
 #define CRABMEAT_MAX_FRAME_PIECES 2
 
-extern const ObjFrame crabmeat_stand[1];
-extern const ObjFrame crabmeat_walk[7];
-extern const ObjFrame crabmeat_shoot[8];
-extern const ObjFrame crabmeat_projectile[6];
+extern const ObjFrame crabmeat_walk[2];
 extern const ObjPiece crabmeat_pieces[];
 
 #endif

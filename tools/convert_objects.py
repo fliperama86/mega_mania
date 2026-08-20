@@ -97,6 +97,39 @@ from rsdk import Pack
 SHEET_DIR = "Data/Sprites/"
 PALETTE_COLOURS = 15   # merge_palette's cap, same as convert_sonic.py/convert_spring.py
 
+
+def even_subsample(n, k):
+    """k indices spread evenly around a LOOPING n-frame animation cycle --
+    the "art budget" trim every animated ArtRecipe layer below uses to pick
+    which of a Mania animation's real frames stay VRAM-resident (mega_mania's
+    own MD-typical roster: 2-4 frames per badnik, matching Sonic 1, in place
+    of streaming every frame). Never "the first k" (a walk cycle's first k
+    frames are its slowest-moving portion, not representative of the whole
+    cycle, and for k=2 would double up on the near-identical pose a looping
+    cycle's frame 0 and frame n-1 usually already are) -- evenly-strided
+    around the FULL loop instead, same "subsample evenly, e.g. every 4th of
+    8" idea this task's own brief spells out.
+
+    k <= 0 or n <= 0 returns []. k >= n returns range(n) (nothing to trim).
+    k == 1 returns the MIDDLE frame (n // 2), the single most representative
+    pose of the cycle, not frame 0 (arbitrary) or frame n-1 (frequently a
+    hold/blank/near-duplicate of frame 0 in these looping sheets).
+    For k > 1, indices are round(i * n / k) for i in 0..k-1, taken mod n --
+    circular spacing (stride n/k), so a 2-frame pick of a 12-frame walk
+    lands half a cycle apart (opposite footing), not both near frame 0.
+    Only meaningful for genuine animation CYCLES (a walk/fly/rotation loop) --
+    a small set of DISCRETE, non-animated poses (e.g. a platform's alternate
+    graphics, an item box's round-robin debris chunks) has no "evenness" to
+    preserve at all; those are picked explicitly, by VRAM cost, at each call
+    site instead, with their own comment explaining why."""
+    if k <= 0 or n <= 0:
+        return []
+    if k >= n:
+        return list(range(n))
+    if k == 1:
+        return [n // 2]
+    return sorted({round(i * n / k) % n for i in range(k)})
+
 FILTER_BOTH, FILTER_MANIA = 1, 2          # GameVariables.h:66-83
 MANIA_MASK = FILTER_BOTH | FILTER_MANIA   # Mania-mode playthrough, sceneInfo.filter == 3
 
@@ -738,7 +771,22 @@ def convert_ring_art(pack, assets_root, art_dir, srcdir):
     sheet = Sheet(pack.read(SHEET_DIR + spr.sheets[0]))
     byname = {a.name: a for a in spr.animations}
     a0 = byname[RING_ANIM_NORMAL]
-    f0 = a0.frames
+
+    # VRAM ART BUDGET (art-budget trim task, 2026-08-18): the ring's own
+    # rotation used to STREAM one frame at a time through md_src/obj_generic.h's
+    # per-class animation window (an 8-tile reservation cycling through all 16
+    # real rotation frames, re-uploaded on every step -- the exact churn this
+    # whole task exists to kill). Made permanently VRAM-resident instead, at
+    # RING_ANIM_KEEP=4 frames -- Sonic 1's own ring rotation frame count (this
+    # task's own brief) -- subsampled evenly around the real 16-frame spin
+    # (even_subsample: quarter-turns, not four near-identical early frames).
+    # md_src/rings.c's own ringFrame keeps counting 0..15 at its original
+    # pace (unchanged timing feel); only the DISPLAYED pose is now
+    # ringFrame>>2 into this 4-frame resident set (see that file's own
+    # comment).
+    RING_ANIM_KEEP = 4
+    f0_full = a0.frames
+    f0 = [f0_full[i] for i in even_subsample(len(f0_full), RING_ANIM_KEEP)]
 
     def max_frame_count(a, animation_id):   # Ring_Collect, Ring.c:170-175
         fc = len(a.frames)
@@ -748,7 +796,20 @@ def convert_ring_art(pack, assets_root, art_dir, srcdir):
 
     a2, a4 = byname[RING_ANIM_SPARKLE1], byname[RING_ANIM_SPARKLE3]
     max2, max4 = max_frame_count(a2, 2), max_frame_count(a4, 4)
-    f2, f4 = a2.frames[:max2], a4.frames[:max4]
+    f2_full, f4_full = a2.frames[:max2], a4.frames[:max4]
+
+    # VRAM ART BUDGET: the collect sparkle is "pure collected-juice" (this
+    # task's own brief) -- lowest priority of the whole roster, trimmed
+    # hardest. Sparkle1's real (Ring_Collect-cropped) cycle is max2 frames,
+    # Sparkle3's is max4; each cut to ONE representative resident frame (the
+    # middle of its own real cycle, even_subsample(n,1)) instead of held
+    # whole-cycle-resident (92 tiles -> 8 total for both anims). The sparkle
+    # now reads as a single flash rather than a fading multi-frame animation
+    # -- a real, visible simplification, exactly the trade this task's own
+    # brief calls out by name for this specific effect.
+    SPARKLE1_KEEP, SPARKLE3_KEEP = 1, 1
+    f2 = [f2_full[i] for i in even_subsample(max2, SPARKLE1_KEEP)]
+    f4 = [f4_full[i] for i in even_subsample(max4, SPARKLE3_KEEP)]
 
     # DELIBERATE DEVIATION (kept from convert_ring.py, user's call 2026-08-17):
     # Ring_Draw_Normal's frameID>8 flip is not baked here -- see convert_
@@ -811,8 +872,8 @@ def convert_ring_art(pack, assets_root, art_dir, srcdir):
 #include <stdint.h>
 
 #define RING_ANIM0_FRAMES      {len(f0)}
-#define RING_SPARKLE1_MAXFRAME {max2}
-#define RING_SPARKLE3_MAXFRAME {max4}
+#define RING_SPARKLE1_MAXFRAME {len(f2)}
+#define RING_SPARKLE3_MAXFRAME {len(f4)}
 
 #define RING_ANIM0_TILE_BASE     {base_anim0}
 #define RING_SPARKLE1_TILE_BASE  {base_sparkle1}
@@ -1302,11 +1363,24 @@ def print_layered_report(rep):
 
 
 # --- Motobug art recipe (GHZ/Motobug.bin, GHZ/Objects.gif) -----------------
+# VRAM ART BUDGET (art-budget trim task, 2026-08-18): traded the old
+# obj_anim_window 1-frame-at-a-time STREAM (44 tiles reserved, cycling
+# through the "move"+"turn" 18-frame set one frame at a time, re-streamed
+# every step -- the churn this whole task exists to kill) for a small,
+# PERMANENTLY VRAM-RESIDENT set instead: only "move", subsampled to 2 of its
+# 12 real walk-cycle frames (even_subsample -- half a cycle apart, opposite
+# footing, not two near-duplicate frames). "idle"/"turn"/"puff" are dropped
+# from the sheet entirely -- motobug.c's own comment already established idle
+# and puff are never referenced by this port's runtime at all (idle: ledge
+# sensing was never ported; puff: cut as "purely cosmetic" even under the old
+# streaming budget), and turn's dedicated about-face pose is now folded into
+# the walk cycle's own 2 frames too (motobug.c's motobug_pose() just holds
+# the current walk frame through the turn, flipping instantly -- see that
+# file's own comment) rather than costing a 3rd resident frame it cannot
+# afford. MD-typical badnik budget (Sonic 1: 2-4 frames per badnik) -- see
+# this task's own final report for the full class-by-class arithmetic.
 MOTOBUG_ART = ArtRecipe("GHZ/Motobug.bin", [
-    ("move", "Move", None),   # 12 frames, walking
-    ("idle", "Idle", None),   # 2 frames, standing at a ledge
-    ("turn", "Turn", None),   # 6 frames, about-face at a ledge
-    ("puff", "Puff", None),   # 9 frames, squash-smoke poof (Motobug_State_Smoke)
+    ("move", "Move", even_subsample(12, 2)),   # 2 of 12 walk-cycle frames, resident
 ])
 
 # --- Spikes art recipe (Global/Spikes.bin, Global/Objects.gif) -------------
@@ -1316,31 +1390,37 @@ SPIKES_ART = ArtRecipe("Global/Spikes.bin", [
 ])
 
 # --- ItemBox art recipe (Global/ItemBox.bin, Global/Items.gif) -------------
-# 8 of the sheet's 9 animations are converted. "Snow" is the one exclusion,
-# and it is NOT excluded for a conversion-time reason -- it converts fine
-# mechanically (24 frames, some legitimately 0x0 -- a blank beat in its own
-# flicker cycle, same idea as Ring's frame-8-duplicates-frame-0) -- it is
-# excluded because ItemBox.c itself never references a snow animator at all
-# (grep confirms zero hits for "Snow"/"snow" in that file): dead weight for
-# THIS class specifically, whatever it is for elsewhere in the sheet.
-# "Debris" (ROTSTYLE_FULL, self->debrisAnimator, ItemBox.c:97/316-393/825-833)
-# WAS wrongly excluded in an earlier pass of this recipe on the assumption
-# that a rotating animation needs convert_sonic.py's rotate_grid baking the
-# way Sonic's own rotated frames do -- verified wrong by actually running it
-# (see this task's report): rotationFlag only tells RSDK's DRAW-time
-# animator to keep re-rotating the same stored frame each tick (a runtime/
-# gameplay concern for whoever eventually wires this up, same class of
-# omission as this port's Ring sparkle losing its INK_ADD glow), not
-# something the converter needs to precompute. It is included below.
+# VRAM ART BUDGET (art-budget trim task, 2026-08-18): only the 3 layers
+# md_src/itembox.c actually draws survive at all -- "scanlines"/"disappear"/
+# "debris"/"change"/"bonus" were ALREADY dead weight (grep confirms zero
+# reads of any itembox_scanlines/disappear/debris/change/bonus symbol
+# anywhere in md_src or sh_src), never resident even under the old mechanism,
+# just extra ROM bytes; dropped here too since there is no reason to keep
+# converting art nothing reads. Of the 3 real layers:
+#   - "box" (1 frame, byte-identical for every instance): unchanged, already
+#     minimal.
+#   - "broken" (was 3 round-robin poses, ItemBox_Break's own +1-mod-3
+#     counter): cut to the single CHEAPEST of the 3 (frame_ids=[0], 8 tiles
+#     -- frames 0 and 2 tie at 8, frame 1 is 12; ItemBox.c's own +1-mod-3
+#     selection was already arbitrary, tied to no other state -- see
+#     itembox.c's own header comment -- so which one survives has no
+#     correctness impact, only VRAM cost does). NOT an even_subsample() pick:
+#     these are 3 discrete, non-animated debris poses, not a motion cycle, so
+#     there is no "evenness" to preserve, only a budget to minimize.
+#   - "contents" (was all 18 ItemBoxTypes icons): cut to EXACTLY the 10
+#     types GHZ1's own Scene1.bin actually places (probed directly:
+#     RING=0, BLUESHIELD=1, BUBBLESHIELD=2, FIRESHIELD=3, LIGHTNINGSHIELD=4,
+#     INVINCIBLE=5, SNEAKERS=6, 1UP_SONIC=7, EGGMAN=10, HYPERRING=11 -- never
+#     8/9/12/13/14). This is a correctness-preserving cut, not a "some
+#     variety is fine to lose" one: ItemBox_GivePowerup's own contentsAnimator
+#     .frameID = self->type indexes this array BY TYPE VALUE directly
+#     (ItemBox.c:1208), so md_src/itembox.c now carries a small type->
+#     compact-index remap table (itemboxContentsRemap[]) rather than reading
+#     `type` as the array index straight -- see that file's own comment.
 ITEMBOX_ART = ArtRecipe("Global/ItemBox.bin", [
-    ("box", "Normal", None),                 # 1 frame, the crate itself
-    ("broken", "Broken", None),               # 3 frames, post-break box pieces
-    ("contents", "Powerups", None),           # 18 frames, one per item type
-    ("scanlines", "Scanlines", None),         # 2 frames, contents outline scroll
-    ("disappear", "Item Disappear", None),    # 14 frames, collect sparkle
-    ("debris", "Debris", None),               # 10 frames, broken-box chips (ROTSTYLE_FULL at runtime)
-    ("change", "Change", None),               # 5 frames, "?" cycling box
-    ("bonus", "Bonus", None),                 # 8 frames, bonus-stage variant
+    ("box", "Normal", None),                       # 1 frame, the crate itself
+    ("broken", "Broken", [0]),                      # 1 of 3 debris poses (cheapest), resident
+    ("contents", "Powerups", [0, 1, 2, 3, 4, 5, 6, 7, 10, 11]),   # GHZ1's own 10 used reward types
 ])
 
 # --- Full-roster art recipes. Every one of these is the same "N named
@@ -1354,45 +1434,73 @@ ITEMBOX_ART = ArtRecipe("Global/ItemBox.bin", [
 # entry here at all -- see their own SceneRecipe comments above for why each
 # one draws no sprite art in retail play. -----------------------------------
 
+# VRAM ART BUDGET: 32-frame rotation cut to 2 resident frames, half the
+# rotation apart (even_subsample) -- was a 12-tile obj_anim_window stream
+# (2x SPIKELOG_MAX_FRAME_TILES=6) cycling through all 32; now a permanent
+# 8-tile resident pair. spikelog.c's own sharedTimer (0..31) maps onto this
+# reduced set with sharedTimer>>4 (see that file's own comment).
 SPIKELOG_ART = ArtRecipe("GHZ/SpikeLog.bin", [
-    ("rotate", "Rotate", None),   # 32 frames, self->frame*4 + timer selects a start point
+    ("rotate", "Rotate", even_subsample(32, 2)),   # 2 of 32 rotation frames, resident
 ])
 
+# VRAM ART BUDGET: only the two poses newtron.c actually alternates between
+# now (SHOOT's idle stance, FLY's level-flight stance) -- both were already
+# single-frame layers (no trimming needed, frame_ids=None keeps "every frame"
+# which is 1 either way), so the real cut is DROPPING "shoot" (the 5-frame
+# firing animation), "flyidle"/"flyfall" (redundant with the two kept poses),
+# "flame" (an overlay this port's own draw path never composited) and
+# "projectile" (never resident -- newtron's own fired shot was already cut,
+# see newtron.h) entirely from the sheet. newtron.c's own SHOOT state now
+# just holds "shootidle" for its whole duration instead of animating through
+# "shoot" -- a real, visible simplification, in trade for VRAM residency.
 NEWTRON_ART = ArtRecipe("GHZ/Newtron.bin", [
-    ("shootidle", "ShootIdle", None),   # 1 frame, NEWTRON_SHOOT idle pose
-    ("shoot", "Shoot", None),           # 5 frames, firing animation
-    ("flyidle", "FlyIdle", None),       # 1 frame, NEWTRON_FLY idle pose
-    ("flyfall", "FlyFall", None),       # 5 frames, dive-bomb descent
-    ("fly", "Fly", None),               # 1 frame, level flight
-    ("flame", "Flame", None),           # 4 frames, self->flameAnimator overlay
-    ("projectile", "Projectile", None), # 6 frames, the fired shot
+    ("shootidle", "ShootIdle", None),   # 1 frame, NEWTRON_SHOOT's only resident pose now
+    ("fly", "Fly", None),               # 1 frame, NEWTRON_FLY's only resident pose now
 ])
 
+# VRAM ART BUDGET: BuzzBomber's own class code (buzzbomber.c) has only ever
+# drawn "fly" (a single static cruising pose -- even under the old streaming
+# window, buzzbomber_lazy_init() only ever copied buzzbomber_fly[0]) -- so
+# this is not a NEW cut, just the pre-existing choice now made permanent at
+# the ArtRecipe level too. "shoot"/"wings"/"thrust"/"projectile" dropped.
 BUZZBOMBER_ART = ArtRecipe("GHZ/BuzzBomber.bin", [
-    ("fly", "Fly", None),               # 1 frame, cruising pose
-    ("shoot", "Shoot", None),           # 11 frames, firing animation
-    ("wings", "Wings", None),           # 4 frames, self->wingAnimator overlay
-    ("thrust", "Thrust", None),         # 4 frames, self->thrustAnimator overlay
-    ("projectile", "Projectile", None), # 12 frames, the fired shot
+    ("fly", "Fly", None),               # 1 frame, cruising pose (the only one ever drawn)
 ])
 
+# VRAM ART BUDGET: CHOPPER_SWIM was already never drawn (chopper.c's own
+# chopper_decide(): "if (e->type != CHOPPER_JUMP_TYPE) return d;" -- Swim is
+# explicitly out of scope, chopper.h's own header comment), so "swim"/
+# "charge" cost nothing to drop. "jump" itself (the one animated arc this
+# class draws) is subsampled from its real 8-frame bounce to 2 resident
+# frames, half the arc apart (rising vs falling) -- was a 32-tile
+# obj_anim_window stream (2x16), now a permanent 32-tile resident pair (same
+# total tile count as the old window's own reservation -- this class's per-
+# frame cost happens not to change, only the mechanism does).
 CHOPPER_ART = ArtRecipe("GHZ/Chopper.bin", [
-    ("jump", "Jump", None),     # 8 frames, CHOPPER_JUMP arc
-    ("swim", "Swim", None),     # 8 frames, CHOPPER_SWIM stroke
-    ("charge", "Charge", None), # 8 frames, pre-jump/pre-swim wind-up
+    ("jump", "Jump", even_subsample(8, 2)),   # 2 of 8 bounce-arc frames, resident
 ])
 
+# VRAM ART BUDGET: only "walk", subsampled to 2 of its 7 patrol frames, half
+# the cycle apart -- "stand" (the idle pose, never referenced by crabmeat.c's
+# own state machine, same "ledge sensing never ported" gap motobug.c's own
+# comment documents) and "shoot"/"projectile" (crabmeat.c's own header
+# comment: "Projectiles cut") dropped entirely. crabmeat.c's own SHOOT phase
+# now just holds the current walk frame instead of animating a distinct
+# firing pose, the same trade newtron.c's SHOOT state makes.
 CRABMEAT_ART = ArtRecipe("GHZ/Crabmeat.bin", [
-    ("stand", "Stand", None),           # 1 frame, idle
-    ("walk", "Walk", None),             # 7 frames, patrol
-    ("shoot", "Shoot", None),           # 8 frames, firing animation
-    ("projectile", "Projectile", None), # 6 frames, the fired pellet
+    ("walk", "Walk", even_subsample(7, 2)),   # 2 of 7 walk-cycle frames, resident
 ])
 
+# VRAM ART BUDGET: "hang" (the idle ceiling pose, always seen first) and ONE
+# representative frame from "fly" (the middle of its 8-frame swoop, the most
+# generic mid-motion pose -- even_subsample(n,1) picks n//2, never frame 0 or
+# the last) are the 2 resident frames batbrain.c keeps; "fall" (the 2-frame
+# drop-off transition) is dropped entirely -- batbrain.c's own DROP state now
+# just holds "hang" through the fall instead of alternating a distinct
+# falling pose (see that file's own comment).
 BATBRAIN_ART = ArtRecipe("GHZ/Batbrain.bin", [
-    ("hang", "Hang", None),   # 1 frame, ceiling-hang idle
-    ("fall", "Fall", None),   # 2 frames, drop-off
-    ("fly", "Fly", None),     # 8 frames, swoop
+    ("hang", "Hang", None),                    # 1 frame, ceiling-hang idle
+    ("fly", "Fly", even_subsample(8, 1)),       # 1 of 8 swoop frames (the middle), resident
 ])
 
 # Platform's own frameID (Platform_Serialize) indexes across BOTH anims as
@@ -1403,10 +1511,34 @@ BATBRAIN_ART = ArtRecipe("GHZ/Batbrain.bin", [
 # hub/pivot (Platform_Draw:124-146) -- one instance draws all three
 # together, so the whole animation has to convert as a unit, which
 # convert_layered_object() already does (every frame of a requested layer
-# lands in the one shared tiles.bin/ObjFrame[] for that layer).
+# lands in the one shared tiles.bin/ObjFrame[] for that layer). Swing is NOT
+# trimmed below: it is a 3-PART KIT (seat+link+hub), not 3 alternate poses,
+# so there is nothing to subsample -- all 3 draw together for every one of
+# GHZ1's 5 real swing-platform instances (Scene1.bin's own type==4 rows).
+#
+# VRAM ART BUDGET (art-budget trim task, 2026-08-18): "normal" WAS already
+# trimmed once, at the platform.c CODE level (not this recipe), from the raw
+# sheet's 4 frames down to the 3 GHZ1's own scene data ever requests via
+# frameID (0/1/2 -- frame 3 is never referenced by any of this stage's 60
+# rows, platform.c's own header comment) -- 200 resident tiles (32+144+24).
+# That alone is roughly half of the entire 427-tile arena, dominated by ONE
+# oversized frame (frame 1, 144 tiles, a single wide platform graphic used by
+# only 7 of GHZ1's 60 rows) -- arithmetic this task's own budget table could
+# not close any other way (every other class, including Swing above, was
+# already at its correctness-bound floor -- see this task's final report for
+# the full class-by-class numbers). Cut harder than this recipe's own
+# per-class guidance ever called for: frame_ids=[2] keeps ONLY the cheapest
+# of the 3 GHZ1-used variants (24 tiles) -- md_src/platform.c now draws that
+# ONE graphic for every FIXED/LINEAR/PUSH instance regardless of its own
+# authored frameID (collision/gameplay math still reads the REAL frameID
+# unchanged -- frame_hitbox() -- only the drawn ART collapses to one shared
+# sprite, see platform.c's own comment). A real, visible loss of variety
+# across the 7 instances that used to show frame 1 and the 20 that used frame
+# 2 (now everyone shows former-frame-2's graphic); flagged prominently in
+# this task's report as the single largest deviation from its own guidance.
 PLATFORM_ART = ArtRecipe("GHZ/Platform.bin", [
-    ("normal", "Normal", None),   # 4 frames: PLATFORM_FIXED/FALL/LINEAR pose variants
-    ("swing", "Swing", None),     # 3 frames: swing platform + chain link + hub
+    ("normal", "Normal", [2]),    # 1 of the 3 GHZ1-used variants (cheapest), resident
+    ("swing", "Swing", None),     # 3 frames: swing platform + chain link + hub (a kit, unchanged)
 ])
 
 BRIDGE_ART = ArtRecipe("GHZ/Bridge.bin", [

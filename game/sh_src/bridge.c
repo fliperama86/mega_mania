@@ -62,6 +62,37 @@ void bridge_apply(Player *p)
 {
 	uint16_t n, i;
 
+	/* Bridge_Update's foreach_active(Player, player) (Bridge.c:33) only ever
+	 * reaches a player RSDK still counts active; Player_HandleDeath's own
+	 * entity-lifecycle handling takes the dying player out of that active
+	 * set for the rest of its death arc, so the original NEVER runs
+	 * Bridge_HandleCollisions against a mid-death player at all. This port
+	 * has no active-entity list to mirror that against directly, but
+	 * PSTATE_DEATH is this port's own stand-in for exactly that removed-
+	 * from-play state (see player_kill()'s own header comment) -- skip here
+	 * too, or this function's own "already stood" branch below re-snaps
+	 * position.y and zeroes velocity.y EVERY tick the death arc's falling
+	 * position.y next reads velocity.y >= 0 (which is every tick, since
+	 * this same branch just reset it to exactly 0), forever: state_death()
+	 * (sh_src/player.c) sets velocity.x = 0 every tick and integrates
+	 * position += velocity directly instead of calling path_grip/path_air
+	 * while PSTATE_DEATH (that function's own comment: the death arc must
+	 * "carry Sonic straight through terrain, not snag on a wall or ceiling
+	 * mid-fall", transcribing the original's tileCollisions =
+	 * TILECOLLISION_NONE) -- with velocity.x pinned at 0 by state_death()
+	 * and velocity.y re-pinned at 0 every tick by this file's own re-land,
+	 * position never advances in EITHER axis again, and
+	 * PLAYER_DEATH_RESPAWN_VY can never be reached either, so respawn never
+	 * fires -- a full, permanent, bit-identical freeze. This is the exact
+	 * "Sonic hard-stalls on the bridge deck, mid-hop [really: mid-death]
+	 * pose" regression this task investigates: unreachable before the
+	 * landing-band fix (the band sat at world Y roughly [-8,0], so the
+	 * "already stood" branch could never re-trigger from a real bridge
+	 * height either), now reachable since the band actually matches each
+	 * bridge's own position. */
+	if (p->state == PSTATE_DEATH)
+		return;
+
 	n = ghz_bridges_sh[0];
 	if (n > BRIDGE_COUNT) n = BRIDGE_COUNT;
 
@@ -118,10 +149,27 @@ void bridge_apply(Player *p)
 				int32_t divisor = offsetFromStart;   /* == stoodPos, just set */
 				int32_t sinArg = (offsetFromStart << 7) / divisor;   /* == 1<<7, but written to mirror Bridge.c:167 exactly */
 				int32_t hitY = (bridgeDepth * platform_sin512(sinArg) >> 9) - 0x80000;
+				/* BUG FIX (2026-08-18, this task): hitY is a delta from the
+				 * bridge's OWN position, same as bridgeDepth is everywhere
+				 * else in this file (see the landing assignment three lines
+				 * below, `hitY + posY - ...`, and the already-stood branch's
+				 * `posY + bridgeDepth - ...`) -- Bridge.c:174-182's own
+				 * hitboxBridge.top/bottom are RSDK Hitbox fields, always
+				 * offsets from the OWNING ENTITY's position (self->position),
+				 * tested by Player_CheckCollisionTouch(entity, self,
+				 * &hitboxBridge) against a box positioned at self->position +
+				 * hitbox, never as absolute world pixels. This band was
+				 * computed from hitY alone with no +posY, so it sat at
+				 * roughly [-8,0] world px regardless of where the bridge
+				 * actually is (every GHZ1 bridge's own y is 200-1960) --
+				 * the landing test could never pass anywhere in the level,
+				 * which is this task's own reported "Sonic falls straight
+				 * through the bridge, no collision at all". */
+				int32_t hitYAbs = hitY + posY;
 				int32_t bandTop, bandBottom, playerBottom;
 
-				if (p->e.velY >= 0x8000) { bandTop = hitY >> 16; bandBottom = bandTop + 8; }
-				else { bandBottom = hitY >> 16; bandTop = bandBottom - 8; }
+				if (p->e.velY >= 0x8000) { bandTop = hitYAbs >> 16; bandBottom = bandTop + 8; }
+				else { bandBottom = hitYAbs >> 16; bandTop = bandBottom - 8; }
 
 				playerBottom = (p->e.y >> 16) + p->e.outer.bottom;
 				if (playerBottom >= bandTop && playerBottom <= bandBottom) {

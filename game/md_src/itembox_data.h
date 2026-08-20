@@ -6,18 +6,13 @@
 #include <stdint.h>
 #include "obj_data.h"
 
-#define ITEMBOX_PAL 3
+#define ITEMBOX_PAL 0
 #define ITEMBOX_MAX_FRAME_TILES  16
 #define ITEMBOX_MAX_FRAME_PIECES 1
 
 extern const ObjFrame itembox_box[1];
-extern const ObjFrame itembox_broken[3];
-extern const ObjFrame itembox_contents[18];
-extern const ObjFrame itembox_scanlines[2];
-extern const ObjFrame itembox_disappear[14];
-extern const ObjFrame itembox_debris[10];
-extern const ObjFrame itembox_change[5];
-extern const ObjFrame itembox_bonus[8];
+extern const ObjFrame itembox_broken[1];
+extern const ObjFrame itembox_contents[10];
 extern const ObjPiece itembox_pieces[];
 
 #endif

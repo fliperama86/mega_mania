@@ -6,17 +6,12 @@
 #include <stdint.h>
 #include "obj_data.h"
 
-#define NEWTRON_PAL 0
+#define NEWTRON_PAL 3
 #define NEWTRON_MAX_FRAME_TILES  21
 #define NEWTRON_MAX_FRAME_PIECES 3
 
 extern const ObjFrame newtron_shootidle[1];
-extern const ObjFrame newtron_shoot[5];
-extern const ObjFrame newtron_flyidle[1];
-extern const ObjFrame newtron_flyfall[5];
 extern const ObjFrame newtron_fly[1];
-extern const ObjFrame newtron_flame[4];
-extern const ObjFrame newtron_projectile[6];
 extern const ObjPiece newtron_pieces[];
 
 #endif

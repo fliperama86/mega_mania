@@ -108,16 +108,30 @@ static void platform_read(uint16_t i, PlatformDef *d)
 }
 
 /* ---- Local, VRAM-rebased frame/piece tables -----------------------------
- * Only the tiles Act 1 actually uses: platform_normal[0..2] (32/144/24
- * tiles -- frame 3 is never referenced by any of this stage's 60 rows, see
- * sh_src/platform.c's own header comment) and all of platform_swing[0..2]
- * (12/4/4 tiles). 200+20 = 220 tiles total, TWO separate arena tenants (see
- * platform_init() below) rather than one, since the two source ranges are
- * not contiguous in platform_tiles (frame 3's 32 tiles sit between them) and
- * the arena's own whole-blob upload only ever copies one contiguous range. */
-static ObjFrame pfFrames[6];      /* 0-2 normal, 3 swing seat, 4 swing link, 5 swing hub */
-static ObjPiece pfPieces[18];     /* 2+10+2 normal, 2+1+1 swing */
+ * VRAM ART BUDGET (art-budget trim task, 2026-08-18): "normal" -- already
+ * trimmed once, at THIS file's own level, from the raw sheet's 4 frames down
+ * to the 3 GHZ1's own scene data actually requests via frameID (0/1/2,
+ * 200 tiles: 32+144+24) -- is cut MUCH harder here, at the
+ * tools/convert_objects.py PLATFORM_ART level instead: only ONE of those 3
+ * survives (frame 2, the cheapest at 24 tiles) -- see that recipe's own
+ * comment for the full arithmetic (this single class was, on its own,
+ * roughly half of the entire 427-tile arena budget; no other class's own
+ * guidance-level trim could close the gap without this one going further
+ * than its own guidance ever called for). Every FIXED/LINEAR/PUSH instance
+ * now draws this ONE graphic regardless of its own authored frameID --
+ * frame_hitbox(d.frameID) below (platform_tick()'s own FALL/PUSH touch
+ * tests) still reads the REAL frameID unchanged, so collision/gameplay is
+ * untouched, only the drawn ART collapsed. "swing" is unchanged (12/4/4
+ * tiles, a 3-part KIT -- seat+link+hub, not alternate poses -- not
+ * something frame-count trimming applies to at all, see PLATFORM_ART's own
+ * comment). 24+20 = 44 tiles total now, not 220. */
+static ObjFrame pfFrames[4];      /* 0 normal, 1 swing seat, 2 swing link, 3 swing hub */
+static ObjPiece pfPieces[6];      /* 2 normal, 2+1+1 swing */
 static uint8_t normalLive, swingLive;
+
+#define PF_SWING_SEAT 1
+#define PF_SWING_LINK 2
+#define PF_SWING_HUB  3
 
 static void platform_copy_frame(uint8_t dstIdx, const ObjFrame *src, const ObjPiece *srcPieces, uint8_t *pn)
 {
@@ -140,26 +154,25 @@ static void platform_copy_frame(uint8_t dstIdx, const ObjFrame *src, const ObjPi
 	}
 }
 
-static uint16_t pfNormalRawOffset[3];
+static uint16_t pfNormalRawOffset;
 static uint16_t pfSwingRawOffset[3];
 
 static void platform_normal_onBase(uint16_t base)
 {
-	uint8_t i;
-	for (i = 0; i < 3; i++) pfFrames[i].tileOffset = (uint16_t)(base + pfNormalRawOffset[i]);
+	pfFrames[0].tileOffset = (uint16_t)(base + pfNormalRawOffset);
 }
 static void platform_normal_onLive(uint8_t live) { normalLive = live; }
 
 static void platform_swing_onBase(uint16_t base)
 {
 	uint8_t i;
-	for (i = 0; i < 3; i++) pfFrames[3 + i].tileOffset = (uint16_t)(base + pfSwingRawOffset[i]);
+	for (i = 0; i < 3; i++) pfFrames[PF_SWING_SEAT + i].tileOffset = (uint16_t)(base + pfSwingRawOffset[i]);
 }
 static void platform_swing_onLive(uint8_t live) { swingLive = live; }
 
 static ArenaClassDesc platformNormalArenaDesc = {
 	(const void *)0, PLATFORM_RECORD_SIZE, PLATFORM_COUNT,
-	(const uint32_t *)0, 200,
+	(const uint32_t *)0, PLATFORM_MAX_FRAME_TILES,   /* 24 -- the one kept frame */
 	0, OBJ_PRI_PLATFORM,
 	platform_normal_onBase, platform_normal_onLive
 };
@@ -192,7 +205,8 @@ static ObjTypeDesc platformWinDesc = {
 	(const ObjFrame *)0, (const ObjPiece *)0,
 	OBJ_PRI_PLATFORM, PLATFORM_PAL, 0,
 	280,
-	(ObjDecideFn)0, (void *)0
+	(ObjDecideFn)0, (void *)0,
+	(const ObjPieceTemplate *)0, (const ObjPieceTemplate *)0   /* window-only desc, never drawn through obj_type_draw() */
 };
 
 /* ---- Per-instance observational state (Fall/Push only) -- see this file's
@@ -316,30 +330,33 @@ void platform_init(void)
 	}
 
 	pn = 0;
-	pfNormalRawOffset[0] = 0;   pfNormalRawOffset[1] = 32;  pfNormalRawOffset[2] = 176;
+	pfNormalRawOffset = 0;
 	platform_copy_frame(0, &platform_normal[0], &platform_pieces[platform_normal[0].pieceOffset], &pn);
-	platform_copy_frame(1, &platform_normal[1], &platform_pieces[platform_normal[1].pieceOffset], &pn);
-	platform_copy_frame(2, &platform_normal[2], &platform_pieces[platform_normal[2].pieceOffset], &pn);
 
+	/* VRAM ART BUDGET: platform_tiles_md's own layout is now [normal frame
+	 * (PLATFORM_MAX_FRAME_TILES=24 tiles), swing seat/link/hub (20 tiles)]
+	 * back to back -- tools/convert_objects.py's PLATFORM_ART converts
+	 * "normal" (1 frame) then "swing" (3 parts), in that order, into one
+	 * shared sheet. */
 	pfSwingRawOffset[0] = 0; pfSwingRawOffset[1] = 12; pfSwingRawOffset[2] = 16;
-	platform_copy_frame(3, &platform_swing[0], &platform_pieces[platform_swing[0].pieceOffset], &pn);
-	platform_copy_frame(4, &platform_swing[1], &platform_pieces[platform_swing[1].pieceOffset], &pn);
-	platform_copy_frame(5, &platform_swing[2], &platform_pieces[platform_swing[2].pieceOffset], &pn);
+	platform_copy_frame(PF_SWING_SEAT, &platform_swing[0], &platform_pieces[platform_swing[0].pieceOffset], &pn);
+	platform_copy_frame(PF_SWING_LINK, &platform_swing[1], &platform_pieces[platform_swing[1].pieceOffset], &pn);
+	platform_copy_frame(PF_SWING_HUB, &platform_swing[2], &platform_pieces[platform_swing[2].pieceOffset], &pn);
 
 	if (*ghz_platforms_count_p != PLATFORM_COUNT) return;
 
 	platformWinDesc.entries = (const void *)k_platform_bytes;
 	platformNormalArenaDesc.entries = (const void *)k_platform_bytes;
-	platformNormalArenaDesc.tilePixels = platform_tiles_md;   /* offset 0, 200 tiles */
+	platformNormalArenaDesc.tilePixels = platform_tiles_md;   /* offset 0, PLATFORM_MAX_FRAME_TILES tiles */
 	slot = obj_arena_register(&platformNormalArenaDesc);
 	base = obj_arena_boot_load(slot);
 	if (base != 0xFFFF) {
-		vdp_tiles_load(platform_tiles_md, base, 200);
+		vdp_tiles_load(platform_tiles_md, base, PLATFORM_MAX_FRAME_TILES);
 		obj_arena_boot_done(slot);
 	}
 
 	platformSwingArenaDesc.entries = (const void *)k_platform_bytes;
-	platformSwingArenaDesc.tilePixels = platform_tiles_md + (uint32_t)232 * 8;   /* 20 tiles */
+	platformSwingArenaDesc.tilePixels = platform_tiles_md + (uint32_t)PLATFORM_MAX_FRAME_TILES * 8;   /* 20 tiles */
 	slot = obj_arena_register(&platformSwingArenaDesc);
 	base = obj_arena_boot_load(slot);
 	if (base != 0xFFFF) {
@@ -437,9 +454,9 @@ static uint16_t platform_emit_swing(const PlatformDef *d, VDPSprite *list,
 	int32_t angle, ampSwingY, seatPx, seatPy, cnt, i;
 	uint16_t n = 0;
 	uint8_t flip = 0;
-	const ObjFrame *linkF = &pfFrames[4];
-	const ObjFrame *hubF = &pfFrames[5];
-	const ObjFrame *seatF = &pfFrames[3];
+	const ObjFrame *linkF = &pfFrames[PF_SWING_LINK];
+	const ObjFrame *hubF = &pfFrames[PF_SWING_HUB];
+	const ObjFrame *seatF = &pfFrames[PF_SWING_SEAT];
 
 	if (!swingLive) return 0;
 
@@ -500,10 +517,30 @@ uint16_t platform_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
 		PlatformDef d;
 		int32_t px, py;
 		const ObjFrame *f;
+		const uint8_t *rec = k_platform_bytes + (uint32_t)i * PLATFORM_RECORD_SIZE;
+
+		/* PEEK-BEFORE-DECODE (Job 2, this task): same two skip conditions as
+		 * before (d.frameID<0, d.collision==PLATFORM_C_NONE), tested directly
+		 * on the two raw bytes that platform_read() would decode them from,
+		 * BEFORE paying for the rest of that decode -- amplitudeX/amplitudeY/
+		 * angle are each their own 4-byte big-endian reconstruction
+		 * (rd_i32()), work this entry may never need. Exactly the same
+		 * "peek the raw byte, skip before the full decode" shape
+		 * platform_tick() above already uses for its own rawType gate.
+		 * platform.c's own widened 280px window margin (this file's top
+		 * comment) means this loop's candidate range often includes rows
+		 * that end up skipped here -- every one of them used to pay for a
+		 * full 30-byte decode first. Provably equivalent: rec[15]/rec[16]
+		 * are the exact same bytes platform_read() reads into
+		 * d.frameID/d.collision (`d->frameID = (int8_t)rec[15];
+		 * d->collision = rec[16];`), from the same immutable ROM record, so
+		 * testing them here first can never see a different value -- see
+		 * this task's own host-harness equivalence proof
+		 * (job2_platform_peek_harness.c). */
+		if ((int8_t)rec[15] < 0) continue;
+		if (rec[16] == PLATFORM_C_NONE) continue;   /* invisible driver row */
 
 		platform_read(i, &d);
-		if (d.frameID < 0) continue;
-		if (d.collision == PLATFORM_C_NONE) continue;   /* invisible driver row */
 
 		if (d.type == PLATFORM_SWING) {
 			n = (uint16_t)(n + platform_emit_swing(&d, list, (uint16_t)(firstIndex + n),
@@ -512,10 +549,17 @@ uint16_t platform_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
 		}
 		if (!normalLive) continue;
 
+		/* VRAM ART BUDGET: only ONE "normal" art frame is resident now (this
+		 * file's own top comment) -- every FIXED/FALL/LINEAR/PUSH instance
+		 * draws pfFrames[0] regardless of its own real d.frameID. Position
+		 * math is untouched (still reads the real per-type formulas above),
+		 * and frame_hitbox(d.frameID) elsewhere (platform_tick()'s own FALL/
+		 * PUSH touch tests) still reads the REAL frameID unchanged -- only
+		 * the drawn ART collapsed, not collision/gameplay. */
 		switch (d.type) {
 		case PLATFORM_FIXED:
 			fixed_pos(&d, &px, &py);
-			f = &pfFrames[(uint8_t)d.frameID <= 2 ? d.frameID : 0];
+			f = &pfFrames[0];
 			break;
 		case PLATFORM_FALL:
 			if (!fall_pos(&d, i, &px, &py)) continue;
@@ -523,12 +567,12 @@ uint16_t platform_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
 			break;
 		case PLATFORM_LINEAR:
 			linear_pos(&d, g_platform_tick_md, &px, &py);
-			f = &pfFrames[(uint8_t)d.frameID <= 2 ? d.frameID : 0];
+			f = &pfFrames[0];
 			break;
 		case PLATFORM_PUSH:
 			px = d.x + pushOffsetPx[i];
 			py = d.y;
-			f = &pfFrames[2];
+			f = &pfFrames[0];
 			break;
 		default:
 			continue;

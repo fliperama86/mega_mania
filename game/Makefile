@@ -45,10 +45,22 @@ SHLIBS   = -L$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER) -lgcc
 # 68000 side stays off -mshort: it is blitbench's choice, not a 32X
 # requirement (docs/hardware-budget.md, section 3), and matching the game's
 # own prior flags avoids auditing every int in the ported physics.
-MDCCFLAGS  = -m68000 -Wall -Wextra -std=c99 -ffreestanding
-MDCXXFLAGS = -m68000 -Wall -Wextra -std=c++17 -ffreestanding
-SHCCFLAGS  = -m2 -mb -Wall -Wextra -pedantic -std=c99 -ffreestanding
-SHCXXFLAGS = -m2 -mb -Wall -Wextra -pedantic -std=c++17 -ffreestanding
+#
+# -MMD -MP: emit a per-object .d file (GCC dep-tracking, not part of MDEXTRA/
+# SHEXTRA since it has to apply to every build variant, not just release/
+# debug) listing every header each .c/.cpp actually #included, so editing a
+# header rebuilds every object that pulled it in instead of nothing at all
+# (this project's own repeat bug -- obj_sprite.h edits and a missing
+# assets_gen.h dep have each silently left stale objects linked before).
+# -MP adds a phony target per header so a RENAMED/DELETED header doesn't
+# leave a dangling prerequisite that makes Make error out instead of just
+# rebuilding. The generated .d files are `-include`d near the bottom of this
+# file; see that include's own comment for why the explicit assets_gen.h
+# list futher down is kept anyway rather than deleted now that this exists.
+MDCCFLAGS  = -m68000 -Wall -Wextra -std=c99 -ffreestanding -MMD -MP
+MDCXXFLAGS = -m68000 -Wall -Wextra -std=c++17 -ffreestanding -MMD -MP
+SHCCFLAGS  = -m2 -mb -Wall -Wextra -pedantic -std=c99 -ffreestanding -MMD -MP
+SHCXXFLAGS = -m2 -mb -Wall -Wextra -pedantic -std=c++17 -ffreestanding -MMD -MP
 
 # Assembler flags
 MDASFLAGS  = -m68000 --register-prefix-optional
@@ -192,6 +204,7 @@ sh_src/%.o: sh_src/%.cpp
 
 clean:
 	rm -f $(MDOBJS) $(SHOBJS)
+	rm -f $(MDOBJS:.o=.d) $(SHOBJS:.o=.d)
 	rm -f $(MDTARGET).bin $(MDTARGET).elf $(MDTARGET).lst
 	rm -f $(CDOBJS) cd_src/cd.bin cd_src/cd.elf
 	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
@@ -246,16 +259,39 @@ assets_gen.stamp: ../tools/gen_assets.py $(ASSET_BINS)
 
 md_src/assets_gen.h sh_src/assets_gen.s sh_src/mars_gen_mem.ld sh_src/mars_gen_sections.ld: assets_gen.stamp ;
 
-# Every 68000 .c file that reads a bank-1 asset includes md_src/assets_gen.h;
-# this project does not track header dependencies automatically (no -MMD),
-# so each has to be listed explicitly, same discipline as every other
-# incbin/regeneration dependency in this file.
+# Every 68000 .c file that reads a bank-1 asset includes md_src/assets_gen.h.
+# Kept explicit even now that -MMD -MP (further down this file) tracks
+# header deps automatically: -MMD's own .d file for an object is only
+# written AS A SIDE EFFECT of actually compiling that object once, so on a
+# first/clean checkout there is no main.d yet to tell Make "generate
+# assets_gen.h before compiling main.c" -- Make would just try to compile
+# main.c straight away and fail with a missing-header error, since nothing
+# else in this Makefile's graph says main.o depends on the generator's
+# stamp. This explicit list is what supplies that FIRST-build ordering
+# (assets_gen.stamp's rule must run before these objects' first compile);
+# -MMD's own .d files, once they exist, additionally cover the case this
+# list alone does not (a header edited or regenerated between builds is
+# already correctly retriggered via ordinary mtime comparison against a
+# stale .o). Redundant on every build after the first, never wrong.
 md_src/main.o md_src/descriptor.o md_src/sonic.o md_src/springs.o md_src/signpost.o md_src/rings.o: md_src/assets_gen.h
 # BADNIKS batch: motobug.c/crabmeat.c/buzzbomber.c/chopper.c/newtron.c/
 # batbrain.c/badnik_base.c all read their own class's bank-1 scene table
 # and tile sheet through the same generated header -- same "no -MMD, list
 # it by hand" discipline as every entry above.
 md_src/motobug.o md_src/crabmeat.o md_src/buzzbomber.o md_src/chopper.o md_src/newtron.o md_src/batbrain.o md_src/badnik_base.o: md_src/assets_gen.h
+# Found missing (this task, Job 3) by re-`grep -l '"assets_gen.h"' md_src/
+# *.c` against the two lists above and diffing: seven more real #includers
+# were absent from both -- breakablewall.c/bridge.c/decoration.c/itembox.c/
+# platform.c/spikelog.c/spikes.c. Reproduced the actual failure mode this
+# caused under `make clean && make -j4`: assets_gen.h did not exist yet when
+# MDCC raced ahead and started compiling bridge.c/breakablewall.c in
+# parallel with assets_gen.stamp's own recipe, "fatal error: assets_gen.h:
+# No such file or directory" -- not a stale-object risk like the other rows
+# above, a build-breaking one, and -MMD -MP cannot rescue a file's FIRST
+# compile either (same reasoning as this section's own top comment). Added
+# rather than left for -MMD to eventually cover, since by definition it
+# never will for the first build.
+md_src/breakablewall.o md_src/bridge.o md_src/decoration.o md_src/itembox.o md_src/platform.o md_src/spikelog.o md_src/spikes.o: md_src/assets_gen.h
 
 # springs.c/signpost.c's own sprite-building loops compile much larger under
 # release's default -O3 (aggressive unrolling over their piece loops) than
@@ -268,3 +304,22 @@ md_src/motobug.o md_src/crabmeat.o md_src/buzzbomber.o md_src/chopper.o md_src/n
 # the old budget pressure is gone): not worth relitigating a working -Os
 # choice as part of this layout refactor.
 md_src/springs.o md_src/signpost.o: MDEXTRA := -Os -flto -fuse-linker-plugin
+
+# Compiler-generated header dependency tracking (-MMD -MP above, on
+# MDCCFLAGS/SHCCFLAGS/MDCXXFLAGS/SHCXXFLAGS): each md_src/sh_src %.c/%.cpp
+# rule's own recipe writes a matching .d file next to its .o listing every
+# header that .o actually pulled in (transitively -- obj_generic.c including
+# obj_sprite.h including obj_data.h all end up as prerequisites of
+# obj_generic.o), so a header edit now rebuilds every real dependent
+# automatically instead of nothing (this project's own repeat bug: a plain
+# obj_sprite.h edit used to rebuild nothing at all, caught only by luck).
+# `-` prefix: a fresh checkout, or right after `make clean`, has no .d files
+# yet, and plain `include` would hard-error on a missing file where
+# `-include` just contributes no extra prerequisites for that one object
+# this run -- exactly correct, since an object that has never been compiled
+# has no stale header relationship to protect yet; compiling it this run
+# writes its .d for every build after. See the assets_gen.h list just above
+# for the one case this alone still cannot cover (first-build ordering
+# against a generated header, not an ordinary source header).
+-include $(MDOBJS:.o=.d)
+-include $(SHOBJS:.o=.d)

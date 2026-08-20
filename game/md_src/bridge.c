@@ -85,7 +85,8 @@ static ObjTypeDesc bridgeWinDesc = {
 	(const ObjFrame *)0, (const ObjPiece *)0,
 	OBJ_PRI_PLATFORM, BRIDGE_PAL, 0,
 	32,
-	(ObjDecideFn)0, (void *)0
+	(ObjDecideFn)0, (void *)0,
+	(const ObjPieceTemplate *)0, (const ObjPieceTemplate *)0   /* window-only desc, never drawn through obj_type_draw() */
 };
 
 __attribute__((noinline))
@@ -123,6 +124,32 @@ void bridge_tick(int16_t sonicWorldX, int16_t sonicWorldY, uint16_t sonicFrameIn
 	int32_t sx, sy;
 
 	if (!bridgeLive) return;
+
+	/* sh_src/bridge.c's own matching guard (see that file's own top comment
+	 * on bridge_apply() for the full derivation) -- this side has no direct
+	 * PSTATE_DEATH to read (never published, see this file's own top
+	 * comment on why this whole side only ever approximates the real
+	 * SH2-side player), but state_death() (sh_src/player.c) plays ANI_DIE
+	 * and nothing else for its entire death arc (sonic_set_anim(&p->
+	 * animator, ANI_DIE, 0, 0), every tick, until player_init() resets
+	 * everything on respawn), so sonicFrameIndex landing inside
+	 * sonic_anims[ANI_DIE]'s own [first, first+count) range is exactly as
+	 * reliable a "the real player is currently dying" signal as this file's
+	 * hbBottom lookup already trusts sonicFrameIndex for -- the same
+	 * membership test md_src/rings.c (ANI_HURT), md_src/breakablewall.c and
+	 * md_src/itembox.c (both ANI_JUMP) already use against this identical
+	 * parameter. Skipping here keeps this shadow copy's own bstate[] in
+	 * step with the real bridge_apply() now skipping too: without this, a
+	 * player who dies while "already stood" on a bridge would keep this
+	 * side's own copy locked at BSTOOD_PLAYER with a frozen sag forever
+	 * (this file's own "already stood" branch re-triggers off sy > posY -
+	 * ..., true whenever the death arc's own worldY dips back toward the
+	 * bridge, which real bridge_apply() no longer lets happen either now
+	 * that it also skips), rather than decaying back to flat the way an
+	 * ordinary walk-off/fall-off does. */
+	if (sonicFrameIndex >= sonic_anims[ANI_DIE].first
+	    && sonicFrameIndex < (uint16_t)(sonic_anims[ANI_DIE].first + sonic_anims[ANI_DIE].count))
+		return;
 
 	hbBottom = (sonicFrameIndex < SONIC_FRAME_COUNT) ? sonic_hitbox[sonicFrameIndex * 4 + 3] : 20;
 	velYApprox = haveLastWorldY ? (int32_t)sonicWorldY - (int32_t)lastWorldY : 0;
@@ -164,7 +191,18 @@ void bridge_tick(int16_t sonicWorldX, int16_t sonicWorldY, uint16_t sonicFrameIn
 				int32_t offsetFromStart = sx - startPos;
 				int32_t sinArg = (offsetFromStart << 7) / offsetFromStart;   /* == 1<<7 -- mirrors sh_src/bridge.c's own always-true "just claimed" branch */
 				int32_t hitY = (bridgeDepth * platform_sin512(sinArg) >> 9) - 0x80000;
-				int32_t bandTop = hitY >> 16, bandBottom = bandTop + 8;
+				/* BUG FIX (2026-08-18, this task): same missing "+posY" this
+				 * side's own sh_src/bridge.c twin had -- see that file's own
+				 * matching comment for the full derivation. hitY is a delta
+				 * from the bridge's own position (posY), not an absolute
+				 * world Y; without this the landing band sat at world Y
+				 * roughly [-8,0] regardless of where any GHZ1 bridge actually
+				 * sits (y=200-1960), so this shadow copy's own stoodState
+				 * never left BSTOOD_NONE either -- bridgeDepth stayed 0
+				 * forever and the sag animation never played, independently
+				 * of the real SH2-side fall-through this mirrors. */
+				int32_t hitYAbs = hitY + posY;
+				int32_t bandTop = hitYAbs >> 16, bandBottom = bandTop + 8;
 				int32_t playerBottom = sonicWorldY + hbBottom;
 
 				if (playerBottom >= bandTop && playerBottom <= bandBottom) {

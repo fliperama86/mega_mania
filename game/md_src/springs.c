@@ -144,6 +144,9 @@ static ObjDrawDecision spring_decide(void *st, uint16_t entryIndex, int16_t ex, 
 
 	d.flipH = (uint8_t)((e->flipFlag & 1) != 0);   /* FLIP_X */
 	d.flipV = (uint8_t)((e->flipFlag & 2) != 0);   /* FLIP_Y */
+	/* Springs never move after spawn -- see obj_data.h's own ObjDrawDecision
+	 * comment (Job 2, this task). */
+	d.offX = 0; d.offY = 0;
 	d.frame = (uint16_t)(o * 2 + ((activeSpring == (int16_t)entryIndex) ? 1 : 0));
 	return d;
 }
@@ -160,7 +163,13 @@ static ObjTypeDesc springType = {
 	sp_frames, sp_pieces,
 	OBJ_PRI_SPRING, SPRING_PAL, 0 /* low priority, matches rings/signpost */,
 	16,                        /* marginX, matches the old camX-16/+16 window */
-	spring_decide, (void *)0
+	spring_decide, (void *)0,
+	/* Not templated (Job 1, this task): spring_decide()'s own d.flipV comes
+	 * from each instance's scene-authored flipFlag and genuinely varies
+	 * (FLIP_Y), which this fast path does not support -- see obj_data.h's
+	 * own ObjTypeDesc.templatesH0/H1 comment. Legacy obj_emit_pieces() path
+	 * unchanged. */
+	(const ObjPieceTemplate *)0, (const ObjPieceTemplate *)0
 };
 
 /* spring_resident[i].tileOffset, stashed at init so spring_arena_onBase()

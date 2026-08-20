@@ -113,6 +113,11 @@ static ObjDrawDecision signpost_decide(void *st, uint16_t entryIndex, int16_t ex
 
 	d.flipH = 0;
 	d.flipV = 0;
+	/* The signpost's own 4 rows never move (post bits are fixed, the plate
+	 * only changes FRAME, not position) -- see obj_data.h's own
+	 * ObjDrawDecision comment (Job 2, this task). */
+	d.offX = 0;
+	d.offY = 0;
 	if (spState == SP_IDLE) { d.frame = OBJ_SKIP; return d; }
 
 	if (entryIndex < 3) {
@@ -132,7 +137,12 @@ static ObjTypeDesc signpostType = {
 	sp_frames, sp_pieces,
 	OBJ_PRI_SIGNPOST, SIGNPOST_PAL_POST, 0 /* low priority, matches rings/springs */,
 	32,                          /* marginX, matches the old camX-32/+32 check */
-	signpost_decide, 0
+	signpost_decide, 0,
+	/* Not templated (Job 1, this task): ONE signpost instance, 4 rows, well
+	 * below the profiled dense-cluster hot path (badniks/rings/spikelog) --
+	 * not worth the added array/rebuild-hook plumbing for this pass. Legacy
+	 * obj_emit_pieces() path unchanged. */
+	0, 0
 };
 
 /* One fixed row, {SIGNPOST_X, SIGNPOST_LANDING_Y}, for the ARENA's own

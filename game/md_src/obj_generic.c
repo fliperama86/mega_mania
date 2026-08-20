@@ -53,6 +53,32 @@ static void x_window(const void *entries, uint8_t recordSize, uint16_t recordCou
 	int32_t xhi = (int32_t)camX + SCREEN_WIDTH + marginX;
 	uint16_t a, b, m;
 
+	if (recordCount == 0) { *lo = *hi = 0; return; }
+
+	/* Fast reject (2026-08-18, 68000 per-frame cost task): every table this
+	 * is ever called on is x-sorted ascending (the precondition the binary
+	 * searches below already depend on), so reading just the FIRST and LAST
+	 * entry is enough to prove the whole table is empty of this frame's
+	 * window without paying for either search. Most of the 18 registered
+	 * draw types (obj_type_draw) plus every arena tenant (arena_window_
+	 * overlaps) are spread across the level and so are empty at any given
+	 * camX far more often than not -- this measured hot in both
+	 * obj_type_draw and obj_arena_tick (this task's own profiling). Exactly
+	 * equivalent to running both searches down to lo==hi, not an
+	 * approximation: if the last entry's x is still below xlo, EVERY entry
+	 * is below xlo, so the real search would land lo==hi==recordCount; if
+	 * the first entry's x is already >= xhi, EVERY entry is >= xhi (xhi is
+	 * always > xlo, SCREEN_WIDTH+marginX*2 > 0), so the real search would
+	 * land lo==hi==0. */
+	if (entry_x(entries, recordSize, (uint16_t)(recordCount - 1)) < xlo) {
+		*lo = *hi = recordCount;
+		return;
+	}
+	if (entry_x(entries, recordSize, 0) >= xhi) {
+		*lo = *hi = 0;
+		return;
+	}
+
 	/* Lower bound: first index with x >= xlo. */
 	a = 0; b = recordCount;
 	while (a < b) {
@@ -109,11 +135,37 @@ uint16_t obj_type_draw(const ObjTypeDesc *desc, VDPSprite *list,
 
 		f = &desc->frames[d.frame];
 		p = &desc->pieces[f->pieceOffset];
-		n = (uint16_t)(n + obj_emit_pieces(list, (uint16_t)(firstIndex + n),
-		               (uint16_t)(firstLink + n), (uint16_t)(maxCount - n),
-		               p, f->pieceCount, f->tileOffset, desc->palette,
-		               (int16_t)(ex - (int16_t)camX), (int16_t)(ey - (int16_t)camY),
-		               f->pivotX, f->pivotY, d.flipH, d.flipV, desc->drawPriority));
+		/* (ex+d.offX, ey+d.offY), not (ex,ey): SPRITE-VS-HITBOX DRIFT fix
+		 * (this task, Job 2, obj_data.h's own ObjDrawDecision comment) --
+		 * decide()'s returned offset is the exact same one it already added
+		 * to ex/ey for its own hitbox touch test, so the drawn sprite tracks
+		 * wherever the hitbox actually is instead of staying pinned at the
+		 * entry's raw scene position. 0 for every class that never moves an
+		 * instance after spawn (rings/springs/signpost/spikelog/decoration),
+		 * making this an exact no-op there. */
+		if (!d.flipV && desc->templatesH0) {
+			/* PRECOMPUTED PIECE TEMPLATES fast path (Job 1, lever 1, this
+			 * task) -- see obj_data.h's own ObjTypeDesc.templatesH0/H1
+			 * comment and obj_sprite.h's own obj_emit_pieces_templated().
+			 * templatesH0/H1 are parallel arrays to desc->pieces (same
+			 * length, same f->pieceOffset indexing), so selecting by
+			 * d.flipH here is exactly the same lookup obj_emit_pieces()'s
+			 * own p = &desc->pieces[f->pieceOffset] above already does,
+			 * just into whichever flip variant this decision asked for. */
+			const ObjPieceTemplate *t = (d.flipH ? desc->templatesH1 : desc->templatesH0) + f->pieceOffset;
+			n = (uint16_t)(n + obj_emit_pieces_templated(list, (uint16_t)(firstIndex + n),
+			               (uint16_t)(firstLink + n), (uint16_t)(maxCount - n),
+			               t, f->pieceCount,
+			               (int16_t)((int16_t)(ex + d.offX) - (int16_t)camX),
+			               (int16_t)((int16_t)(ey + d.offY) - (int16_t)camY)));
+		} else {
+			n = (uint16_t)(n + obj_emit_pieces(list, (uint16_t)(firstIndex + n),
+			               (uint16_t)(firstLink + n), (uint16_t)(maxCount - n),
+			               p, f->pieceCount, f->tileOffset, desc->palette,
+			               (int16_t)((int16_t)(ex + d.offX) - (int16_t)camX),
+			               (int16_t)((int16_t)(ey + d.offY) - (int16_t)camY),
+			               f->pivotX, f->pivotY, d.flipH, d.flipV, desc->drawPriority));
+		}
 	}
 	return n;
 }
@@ -198,7 +250,25 @@ static uint16_t   arenaRefusedCount;
  * profiling), i.e. this exact camera-stationary case. arenaTickPrimed
  * guards the very first call (and any call right after obj_arena_init(),
  * e.g. a hypothetical future re-init): camX==0 is not a safe "nothing
- * changed" sentinel on its own, since 0 is also a legitimate real camX. */
+ * changed" sentinel on its own, since 0 is also a legitimate real camX.
+ *
+ * WHILE MOVING (2026-08-18, same task, follow-up): camX changes almost
+ * every tick once Sonic is actually running, so the exact-equality check
+ * above almost never fires and every class pays the full scan every single
+ * frame -- measured 18/150 PC samples in this function with DEBUG_AUTORUN
+ * running. Widened to a 16px-BLOCK comparison (camX>>4) instead of exact
+ * equality, and this is still exact, not approximate: every registered
+ * class's own lookaheadX is built from ARENA_LOOKAHEAD_X() (obj_generic.h),
+ * which is (loadFrames+1)*ARENA_MAX_SCROLL_PX -- i.e. every class already
+ * carries at least one whole ARENA_MAX_SCROLL_PX=16px unit of margin
+ * specifically to cover "admission is decided once per tick" (that macro's
+ * own comment). Comparing camX>>4 instead of camX itself can defer the
+ * rescan by at most 15px of further camX travel before the block changes
+ * and forces one (camX can only stay in the same 16px block for so long
+ * before crossing out of it, regardless of how many frames that takes) --
+ * that is within the SAME 16px unit every class's margin already reserves
+ * for exactly this kind of once-per-tick scheduling slack, so no class's
+ * real admission/eviction point can ever arrive before this rescans. */
 static uint16_t   arenaLastTickCamX;
 static uint8_t    arenaTickPrimed;
 
@@ -330,9 +400,10 @@ void obj_arena_tick(uint16_t camX)
 	/* Nothing-changed short-circuit -- see arenaLastTickCamX's own comment
 	 * above. Safe to skip BOTH passes below whole: every overlap test either
 	 * pass could run is a pure function of camX alone (plus this class's own
-	 * unchanging desc), so an unchanged camX guarantees an unchanged result,
-	 * for every class, every time. */
-	if (arenaTickPrimed && camX == arenaLastTickCamX) return;
+	 * unchanging desc), so an unchanged 16px BLOCK guarantees an unchanged
+	 * result, for every class, every time (see the block-quantization
+	 * comment above for why 16px is exact here, not approximate). */
+	if (arenaTickPrimed && (camX >> 4) == (arenaLastTickCamX >> 4)) return;
 	arenaTickPrimed = 1;
 	arenaLastTickCamX = camX;
 

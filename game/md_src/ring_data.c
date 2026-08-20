@@ -2,5 +2,5 @@
 
 #include "ring_data.h"
 
-const uint16_t ring_sparkle1_durations[RING_SPARKLE1_MAXFRAME] = { 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8 };
-const uint16_t ring_sparkle3_durations[RING_SPARKLE3_MAXFRAME] = { 8, 8, 8, 8, 16, 8, 8, 8 };
+const uint16_t ring_sparkle1_durations[RING_SPARKLE1_MAXFRAME] = { 8 };
+const uint16_t ring_sparkle3_durations[RING_SPARKLE3_MAXFRAME] = { 16 };

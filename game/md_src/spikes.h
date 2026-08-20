@@ -32,11 +32,15 @@ void spikes_init(void);
 /* Per-object pre-step (obj_pool.h's ObjTickFn shape, but Spikes has no
  * per-frame player-position dependency at all -- see this file's own
  * comment on why the appear/disappear state machine is purely time-driven,
- * not position-driven): advances the shared local tick counter and every
- * moving spike's SHOWN/HIDDEN toggle. Registered with a NULL tick in
- * OBJ_TYPE_LIST instead -- see spikes.c's own comment on why the counter
- * advances from spikes_draw() instead, once per displayed frame, matching
- * every other tick-less row's own reasoning (rings_update()). */
+ * not position-driven): advances the shared local tick counter. Registered
+ * with a NULL tick in OBJ_TYPE_LIST instead -- see spikes.c's own comment on
+ * why the counter advances from spikes_draw() instead, once per displayed
+ * frame, matching every other tick-less row's own reasoning
+ * (rings_update()). Job 1.2 (this task, spikes.c's own comment on
+ * spike_is_shown()): the per-entry SHOWN/HIDDEN toggle is no longer
+ * advanced here (or anywhere) for all 41 entries every frame -- it is a
+ * pure function of the tick counter, recomputed on demand only for entries
+ * the camera window (obj_type_window()) actually considers. */
 uint16_t spikes_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
                      uint16_t camX, uint16_t camY,
                      int16_t sonicWorldX, int16_t sonicWorldY, uint16_t sonicFrameIndex);

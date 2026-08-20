@@ -21,3 +21,8 @@ game/sh_src/mars_gen_sections.ld
 game/assets_gen.stamp
 
 __pycache__/
+
+# compiler-generated header dependency files (Makefile -MMD)
+game/md_src/*.d
+game/sh_src/*.d
+game/cd_src/*.d

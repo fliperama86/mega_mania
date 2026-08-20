@@ -29,61 +29,67 @@ static const uint32_t *const itembox_tiles_md = ASSET_ITEMBOX_TILES;
 #define ITEMBOX_EGGMAN         10
 #define ITEMBOX_HYPERRING      11
 
-/* VRAM (REVISED 2026-08-18, VRAM capacity task): the class's tiles used to be
- * ONE contiguous 116-tile whole-sheet-resident arena tenant (box 16 + broken
- * 28 + contents 72 -- itembox_tiles_md's own generated layout, itembox_data.c)
- * admitted/evicted as a single unit. That single 116-tile request was too
- * big to ever be granted against the arena's pre-reclaim 203-tile size (it
- * was REFUSED outright at boot and stayed evicted for the whole run --
- * ItemBox drew NOTHING, ever) and is still a poor fit for the post-reclaim
- * 427-tile arena once every other class's own demand is counted (see this
- * task's own final report for the arithmetic). Split into THREE independent
- * tenants instead, sized and migrated according to what each ACTUALLY needs,
- * not migrated uniformly:
+/* VRAM ART BUDGET (art-budget trim task, 2026-08-18, on top of the earlier
+ * 2026-08-18 VRAM-capacity split into 3 independent tenants -- box, broken,
+ * contents -- see the git history of this comment for that task's own
+ * reasoning, unchanged below): tools/convert_objects.py's ITEMBOX_ART now
+ * converts far less art than before:
  *
  *   - "box" (16 tiles, exactly ONE frame, byte-identical for every instance
- *     regardless of type): a plain, small whole-sheet-resident arena tenant.
- *     No divergence exists to lose here at all -- there is nothing an anim
- *     window's double-buffering would even do differently -- so it just
- *     stays on the plain arena at its own true (tiny) size instead of
- *     dragging broken/contents along with it.
+ *     regardless of type): unchanged, already minimal.
  *
- *   - "contents" (72 tiles, 18 icon sub-frames): KEPT whole-sheet resident
- *     on the plain arena too, deliberately NOT migrated to the per-class
- *     ANIMATION WINDOW mechanism (md_src/obj_generic.h) that SpikeLog and
- *     ItemBox's own "broken" family below both use. A box's contents icon is
- *     per-instance IDENTITY (WHICH reward it gives -- ring, shield, 1-up,
- *     ...), not an animation phase offset the way SpikeLog's rotation or a
- *     badnik's walk cycle is: this stage's own data shows ~10 different
- *     types simultaneously live across GHZ1 (itembox.h's own header
- *     comment). Collapsing that to the anim window's ONE shared frame would
- *     make every visible box but one show the WRONG reward icon at once --
- *     a correctness bug, not the cosmetic "everyone moves in unison" cost
- *     this task's "lockstep animation" sign-off covers. Exactly the "genuine
- *     state divergence... stays on obj_arena_register() instead" case
- *     obj_generic.h's own top-of-section comment calls out by name (using
- *     rings.c's own sparkle portion as its worked example) -- this is the
- *     same call, made here for the same reason.
+ *   - "contents": cut from all 18 ItemBoxTypes icons to EXACTLY the 10
+ *     types GHZ1's own Scene1.bin actually places (ITEMBOX_ART's own
+ *     comment lists them) -- 40 tiles, not 72. Still plain whole-sheet
+ *     resident, deliberately NOT the anim-window mechanism, for the exact
+ *     "genuine per-instance state divergence" reason this comment's earlier
+ *     revision already gave (a box's reward ICON is which reward it is, not
+ *     an animation phase -- collapsing 10 simultaneously-live types to one
+ *     shared frame would show the WRONG reward on every box but one, a
+ *     correctness bug). Because the kept types are no longer contiguous
+ *     from 0 (type 8 ITEMBOX_1UP_TAILS and 9 ITEMBOX_1UP_KNUX are skipped --
+ *     never placed in this stage), itembox_contents[] is no longer indexable
+ *     BY TYPE VALUE directly the way ItemBox_GivePowerup's own
+ *     contentsAnimator.frameID = self->type does in the original (ItemBox.c:
+ *     1208) -- itemboxContentsRemap[] below maps a real type value to this
+ *     array's own compact 0..9 index instead, built by hand from
+ *     ITEMBOX_ART's own explicit frame_ids list (tools/convert_objects.py),
+ *     which the two must be kept in sync with if that list ever changes.
  *
- *   - "broken" (3 poses, round-robined by instance index i%3 with NO tie to
- *     a box's own type -- ItemBox_Break, ItemBox.c: the original's own
- *     +1-mod-3 counter is arbitrary too, see itembox.h's own header
- *     comment): migrated to the anim window mechanism. Unlike contents,
- *     lockstepping every currently-broken box to the SAME one of the 3
- *     poses loses nothing semantic -- which of the 3 a given box showed was
- *     never tied to its type or any other observable state to begin with --
- *     so this genuinely is the cheap, cosmetic-only "lockstep animation"
- *     cost, not a correctness one. */
+ *   - "broken": cut from 3 round-robined poses to the single CHEAPEST of the
+ *     3 (ItemBox_Break's own +1-mod-3 counter was already arbitrary, tied to
+ *     no other state -- see this comment's earlier revision), and MIGRATED
+ *     OFF the anim-window mechanism entirely, onto the same plain
+ *     whole-sheet residency as box/contents -- there is only ever one pose
+ *     to show now, so a 2x-double-buffered streaming window bought nothing
+ *     a single resident frame does not already give for less (8 tiles vs
+ *     the old window's 32-tile reservation, 2x ITEMBOX_MAX_FRAME_TILES=16). */
 #define ITEMBOX_BOX_TILES           16   /* itembox_box[0].tileCount */
-#define ITEMBOX_CONTENTS_TILES      72   /* itembox_contents[]'s 18 frames * 4 tiles each */
-/* itembox_contents[0].tileOffset (itembox_data.c, generated) -- verified by
- * inspection, not computed at compile time (a generated array's own element
- * is not usable in a constant expression here). "contents" is now its OWN
- * separately-resident VRAM blob, not a sub-range of the old 116-tile
- * combined one, so every itembox_contents[i].tileOffset (44..112, absolute
- * within the FULL 224-tile ROM sheet) needs this subtracted back out to
- * land at 0..68 relative to that blob's own granted base. */
-#define ITEMBOX_CONTENTS_TILE_BASE  44
+#define ITEMBOX_BROKEN_TILES         8   /* itembox_broken[0].tileCount */
+#define ITEMBOX_CONTENTS_TILES      40   /* itembox_contents[]'s 10 kept frames * 4 tiles each */
+/* itembox_broken[0]/itembox_contents[0].tileOffset (itembox_data.c,
+ * generated) -- verified by inspection, not computed at compile time (a
+ * generated array's own element is not usable in a constant expression
+ * here). Each tenant is its OWN separately-resident VRAM blob, so every
+ * itembox_broken[i]/itembox_contents[i].tileOffset (absolute within the
+ * FULL generated sheet) needs its own tenant's base subtracted back out to
+ * land at 0-based relative to that blob's own granted base. */
+#define ITEMBOX_BROKEN_TILE_BASE    16
+#define ITEMBOX_CONTENTS_TILE_BASE  24
+
+/* itembox_contents[]'s compact index for each real ItemBoxTypes value,
+ * built BY HAND from ITEMBOX_ART's own explicit frame_ids list (tools/
+ * convert_objects.py: [0,1,2,3,4,5,6,7,10,11], GHZ1's own 10 used reward
+ * types, sorted ascending) -- index i of that list is compact index i here.
+ * Sized to 12 (covers every real type value this stage's own data ever
+ * emits, 0..11); indices 8/9 (ITEMBOX_1UP_TAILS/1UP_KNUX) are never actually
+ * read (never placed in GHZ1's own Scene1.bin -- ITEMBOX_ART's own comment)
+ * but default to 0 (RING) rather than left undefined, purely defensive. */
+static const uint8_t itemboxContentsRemap[12] = {
+    0, 1, 2, 3, 4, 5, 6, 7,   /* types 0..7  -> compact index 0..7 (identity) */
+    0, 0,                     /* types 8, 9  -> never emitted; defensive 0 */
+    8, 9                      /* type 10 (EGGMAN) -> 8, type 11 (HYPERRING) -> 9 */
+};
 
 static uint8_t boxBroken[ITEMBOX_COUNT];
 
@@ -112,19 +118,19 @@ static ArenaClassDesc itemboxContentsArenaDesc = {
     itembox_contents_onBase, itembox_contents_onLive
 };
 
-/* "broken" -- see this file's own header comment above for why this family,
- * unlike contents, is a safe fit for the shared lockstep window.
- * itembox_broken (itembox_data.c, generated) is already the RAW frame table
- * (tileOffset absolute in the full sheet, not yet rebased to any VRAM
- * address) obj_anim_window_register() wants, same as spikelog.c's own
- * spikelog_rotate -- registered directly, no RAM copy needed. */
-static ObjAnimWindow *itemboxBrokenWindow;   /* NULL until registered */
+/* "broken" -- plain whole-sheet residency now (this file's own top comment),
+ * a single resident frame, no ObjAnimWindow. */
+static uint16_t itemboxBrokenBase;
+static uint8_t  itemboxBrokenLive;
+static void itembox_broken_onBase(uint16_t base) { itemboxBrokenBase = base; }
+static void itembox_broken_onLive(uint8_t live) { itemboxBrokenLive = live; }
 
-static ObjAnimWindowDesc itemboxBrokenAnimDesc = {
+static ArenaClassDesc itemboxBrokenArenaDesc = {
     (const void *)0, sizeof(BoxEntry), ITEMBOX_COUNT,
+    (const uint32_t *)0, ITEMBOX_BROKEN_TILES,
     0, /* lookaheadX, patched in itembox_init() */
     OBJ_PRI_RING,
-    (const uint32_t *)0, itembox_broken, 3, ITEMBOX_MAX_FRAME_TILES
+    itembox_broken_onBase, itembox_broken_onLive
 };
 
 static ObjTypeDesc itemboxWindowDesc;   /* obj_type_window() only */
@@ -152,7 +158,7 @@ void itembox_init(void)
 
     itemboxBoxLive = 0;
     itemboxContentsLive = 0;
-    itemboxBrokenWindow = (ObjAnimWindow *)0;
+    itemboxBrokenLive = 0;
     for (i = 0; i < ITEMBOX_COUNT; i++) boxBroken[i] = 0;
     if (n != ITEMBOX_COUNT) return;
 
@@ -193,15 +199,14 @@ void itembox_init(void)
     }
 
     /* Broken: NOT boot-loaded -- nothing starts already broken, so there is
-     * no frame-1 pop-in to avoid (obj_generic.h's own guidance on when
-     * boot_load is worth calling at all). Its own lookaheadX is built from
-     * ITEMBOX_MAX_FRAME_TILES (this window's own maxFrameTiles), not the
-     * bigger contents-sized margin above -- matches every other migrated
-     * window in this codebase (rings' rotation, spikelog's rotation). */
-    itemboxBrokenAnimDesc.entries = (const void *)ghz_itemboxes_xy;
-    itemboxBrokenAnimDesc.sheetPixels = itembox_tiles_md;
-    itemboxBrokenAnimDesc.lookaheadX = ARENA_LOOKAHEAD_X(ITEMBOX_MAX_FRAME_TILES);
-    itemboxBrokenWindow = obj_anim_window_register(&itemboxBrokenAnimDesc);
+     * no frame-1 pop-in to avoid (obj_generic.h's own guidance on when a
+     * boot-time load is worth its synchronous cost at all). Its own
+     * lookaheadX is built from its own real (small) resident size now, not a
+     * single frame's -- same as every other migrated tenant in this batch. */
+    itemboxBrokenArenaDesc.entries = (const void *)ghz_itemboxes_xy;
+    itemboxBrokenArenaDesc.tilePixels = itembox_tiles_md + (uint32_t)ITEMBOX_BROKEN_TILE_BASE * 8;
+    itemboxBrokenArenaDesc.lookaheadX = ARENA_LOOKAHEAD_X(ITEMBOX_BROKEN_TILES);
+    (void)obj_arena_register(&itemboxBrokenArenaDesc);
 }
 
 /* ItemBox_CheckHit's attacking test (ItemBox.c:418-427), the Sonic-only
@@ -265,18 +270,8 @@ uint16_t itembox_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
      * resident yet (typical for the first few frames after a fresh
      * admission, or before this class's window has ever overlapped the
      * camera at all) -- skip the binary search below entirely. */
-    if (!itemboxBoxLive && !itemboxContentsLive && !obj_anim_window_live(itemboxBrokenWindow))
+    if (!itemboxBoxLive && !itemboxContentsLive && !itemboxBrokenLive)
         return 0;
-
-    /* ONE shared request per tick, same "call unconditionally, let the
-     * window decide if there is anything to do" rule every migrated window
-     * in this codebase follows (obj_anim_window_select()'s own doc
-     * comment). Always frame 0: which of the 3 broken poses a given box
-     * shows was already an arbitrary per-instance round-robin, not tied to
-     * any other state, so there is no "current" value to track across ticks
-     * the way SpikeLog's rotation or a badnik's walk cycle needs -- this
-     * only ever has one thing to ask for. */
-    obj_anim_window_select(itemboxBrokenWindow, 0);
 
     obj_type_window(&itemboxWindowDesc, camX, &lo, &hi);
 
@@ -290,12 +285,13 @@ uint16_t itembox_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
 
         if (boxBroken[i]) {
             const ObjFrame *f;
-            if (!obj_anim_window_live(itemboxBrokenWindow)) continue;
-            f = obj_anim_window_frames(itemboxBrokenWindow);   /* one row, always index 0 */
+            if (!itemboxBrokenLive) continue;
+            f = &itembox_broken[0];   /* only one resident pose now -- see this file's own top comment */
             n = (uint16_t)(n + obj_emit_pieces(list, (uint16_t)(firstIndex + n),
                            (uint16_t)(firstLink + n), (uint16_t)(ITEMBOX_SPRITE_CAP - n),
                            &itembox_pieces[f->pieceOffset], f->pieceCount,
-                           f->tileOffset, ITEMBOX_PAL,
+                           (uint16_t)(itemboxBrokenBase + (f->tileOffset - ITEMBOX_BROKEN_TILE_BASE)),
+                           ITEMBOX_PAL,
                            sx, sy, f->pivotX, f->pivotY, 0, 0, 0));
         } else {
             if (itemboxBoxLive) {
@@ -308,9 +304,13 @@ uint16_t itembox_draw(VDPSprite *list, uint16_t firstIndex, uint16_t firstLink,
             }
             /* ItemBox_State_Idle, ItemBox.c:293-296: contentsPos.y =
              * position.y -/+ 3, direction always FLIP_NONE in this stage's
-             * own data (see this file's own header comment). */
+             * own data (see this file's own header comment). e->type is
+             * remapped through itemboxContentsRemap[] to this class's own
+             * compact (10-entry) resident index -- see that table's own
+             * comment for why a direct `e->type` index no longer works. */
             if (itemboxContentsLive) {
-                const ObjFrame *fc = &itembox_contents[e->type < 18 ? e->type : 0];
+                uint8_t idx = e->type < 12 ? itemboxContentsRemap[e->type] : 0;
+                const ObjFrame *fc = &itembox_contents[idx];
                 n = (uint16_t)(n + obj_emit_pieces(list, (uint16_t)(firstIndex + n),
                                (uint16_t)(firstLink + n), (uint16_t)(ITEMBOX_SPRITE_CAP - n),
                                &itembox_pieces[fc->pieceOffset], fc->pieceCount,

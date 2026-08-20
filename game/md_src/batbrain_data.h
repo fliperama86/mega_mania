@@ -7,12 +7,11 @@
 #include "obj_data.h"
 
 #define BATBRAIN_PAL 0
-#define BATBRAIN_MAX_FRAME_TILES  18
+#define BATBRAIN_MAX_FRAME_TILES  17
 #define BATBRAIN_MAX_FRAME_PIECES 2
 
 extern const ObjFrame batbrain_hang[1];
-extern const ObjFrame batbrain_fall[2];
-extern const ObjFrame batbrain_fly[8];
+extern const ObjFrame batbrain_fly[1];
 extern const ObjPiece batbrain_pieces[];
 
 #endif
